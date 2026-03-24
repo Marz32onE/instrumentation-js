@@ -1,22 +1,10 @@
-# instrumentation-js
-
-OpenTelemetry instrumentation packages for JavaScript/TypeScript.
-
-## Packages
-
-| Package | Description |
-|---------|-------------|
-| [`@marz32one/otel-websocket`](packages/otel-websocket) | WebSocket connections with automatic W3C Trace Context propagation |
-
----
-
-## @marz32one/otel-websocket
+# @marz32one/otel-websocket
 
 TypeScript port of [`instrumentation-go/otel-websocket`](https://github.com/Marz32onE/instrumentation-go/tree/main/otel-websocket).
 
 Wraps a [`ws`](https://github.com/websockets/ws) WebSocket and adds OpenTelemetry distributed-tracing support by propagating the **W3C Trace Context** inside the WebSocket message body.  The wire format is compatible with the Go version, so a TypeScript client can talk to a Go server and vice-versa.
 
-### How it works
+## How it works
 
 | Side | What happens |
 |------|--------------|
@@ -35,16 +23,16 @@ Wraps a [`ws`](https://github.com/websockets/ws) WebSocket and adds OpenTelemetr
 └─────────────────────────────────────┘
 ```
 
-### Installation
+## Installation
 
 ```bash
 npm install @marz32one/otel-websocket @opentelemetry/api
 ```
 
-### Quick start
+## Quick start
 
 ```typescript
-import { ROOT_CONTEXT, propagation, trace } from '@opentelemetry/api';
+import { ROOT_CONTEXT, trace } from '@opentelemetry/api';
 import { CompositePropagator, W3CTraceContextPropagator } from '@opentelemetry/core';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { dial, newConn, TextMessage } from '@marz32one/otel-websocket';
@@ -86,29 +74,31 @@ wss.on('connection', (rawWs) => {
 });
 ```
 
-### API
+## API
 
-#### `newConn(ws, opts?): Conn`
+### `newConn(ws, opts?): Conn`
 
 Wraps an existing `ws.WebSocket` with trace-context propagation.
 
-#### `dial(ctx, url, headers?, opts?): Promise<Conn>`
+### `dial(ctx, url, headers?, opts?): Promise<Conn>`
 
 Convenience dial helper – connects and returns a `Conn`.
 
-#### `conn.writeMessage(ctx, messageType, data): Promise<void>`
+### `conn.writeMessage(ctx, messageType, data): Promise<void>`
 
 Encodes `data` into a JSON envelope containing the W3C trace headers from `ctx`, then sends it.  Creates a `websocket.send` producer span.
 
-#### `conn.readMessage(ctx): Promise<[Context, number, Buffer]>`
+### `conn.readMessage(ctx): Promise<[Context, number, Buffer]>`
 
 Reads the next message, extracts the trace headers, and returns `[context, messageType, payload]`.  Creates a `websocket.receive` consumer span linked to the sender's span.
 
-#### `conn.close(): void`
+If the message was not produced by this library (i.e. not a valid JSON envelope), the raw bytes are returned unchanged with no span context.
+
+### `conn.close(): void`
 
 Closes the underlying WebSocket.
 
-#### Options
+### Options
 
 ```typescript
 interface Options {
@@ -117,16 +107,16 @@ interface Options {
 }
 ```
 
-### Spans created
+## Spans created
 
 | Method | Span name | Kind |
 |--------|-----------|------|
 | `writeMessage` | `websocket.send` | Producer |
 | `readMessage` | `websocket.receive` | Consumer |
 
-`readMessage` creates a span **linked** to the sender's span (not parent-child), following the OTel async messaging convention.
+`readMessage` creates a span **linked** to the sender's span (not parent-child), following the OTel async messaging convention.  Both spans carry `websocket.message.type` and `messaging.message.body.size` attributes.
 
-### Wire format compatibility
+## Wire format
 
 Every `writeMessage` call wraps the payload in a JSON envelope:
 
@@ -134,37 +124,8 @@ Every `writeMessage` call wraps the payload in a JSON envelope:
 { "headers": { "traceparent": "00-…-01" }, "payload": "<base64>" }
 ```
 
-The payload is base64-encoded to match Go's `json.Marshal([]byte)` behaviour – this ensures a TypeScript client can communicate with the Go server and vice-versa.
+The payload is base64-encoded to match Go's `json.Marshal([]byte)` behaviour – this ensures cross-language compatibility with the Go client/server.
 
-If the other side sends a plain (non-envelope) message, `readMessage` returns the raw bytes unchanged with no span context – making it safe to introduce the library incrementally.
+## Backward compatibility
 
----
-
-## Development
-
-```bash
-# Install dependencies
-make install
-
-# Build all packages
-make build
-
-# Run all tests
-make test
-
-# Type-check (lint)
-make lint
-
-# Dry-run npm pack (verify publish contents)
-make publish-dry
-
-# Clean build artefacts
-make clean
-```
-
-### Publishing
-
-```bash
-cd packages/otel-websocket
-npm publish --access public
-```
+If a message was **not** produced by this library, `readMessage` returns the raw bytes unchanged and no span context is injected into the returned context.  This makes it safe to introduce `otel-websocket` incrementally alongside plain WebSocket messages.
