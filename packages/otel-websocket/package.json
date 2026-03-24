@@ -4,6 +4,10 @@
   "description": "OpenTelemetry trace-context propagation for WebSocket connections (TypeScript port of instrumentation-go/otel-websocket)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./browser": "./src/browser.ts"
+  },
   "files": [
     "dist/**/*",
     "README.md"

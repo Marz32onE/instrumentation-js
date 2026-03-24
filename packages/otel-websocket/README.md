@@ -12,15 +12,16 @@ Wraps a [`ws`](https://github.com/websockets/ws) WebSocket and adds OpenTelemetr
 | **Receiver** (`readMessage`) | The JSON envelope is unwrapped, trace-context headers are extracted and used to reconstruct the remote span context, and a new `Context` that carries the propagated span is returned to the caller. |
 
 ```
-┌─────────────────────────────────────┐
-│  WebSocket message body (JSON)       │
-│  {                                   │
-│    "headers": {                      │
-│      "traceparent": "00-abc…-01"     │
-│    },                                │
-│    "payload": "<base64-encoded>"     │
-│  }                                   │
-└─────────────────────────────────────┘
+┌───────────────────────────────────────────────┐
+│  WebSocket message body (JSON)                │
+│  {                                             │
+│    "headers": {                                │
+│      "traceparent": "00-<traceid>-<spanid>-01",│
+│      "tracestate": "k=v"                       │
+│    },                                          │
+│    "payload": "<base64>"                       │
+│  }                                             │
+└───────────────────────────────────────────────┘
 ```
 
 ## Installation
@@ -121,10 +122,18 @@ interface Options {
 Every `writeMessage` call wraps the payload in a JSON envelope:
 
 ```json
-{ "headers": { "traceparent": "00-…-01" }, "payload": "<base64>" }
+{
+  "headers": {
+    "traceparent": "00-<traceid>-<spanid>-<flags>",
+    "tracestate": "k=v"
+  },
+  "payload": "<base64>"
+}
 ```
 
 The payload is base64-encoded to match Go's `json.Marshal([]byte)` behaviour – this ensures cross-language compatibility with the Go client/server.
+
+Canonical rule: `headers` only carries W3C trace context keys (`traceparent`, optional `tracestate`) in lowercase. Extra headers are filtered out to keep Go and JS propagation behaviour identical.
 
 ## Backward compatibility
 

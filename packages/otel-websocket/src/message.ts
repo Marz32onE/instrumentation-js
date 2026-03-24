@@ -13,13 +13,16 @@ export interface Envelope {
   payload: string;
 }
 
+export const TRACEPARENT_HEADER = 'traceparent';
+export const TRACESTATE_HEADER = 'tracestate';
+
 /** Serialises headers and payload into a JSON envelope string. */
 export function marshalEnvelope(
   headers: Record<string, string>,
   payload: Buffer,
 ): string {
   const env: Envelope = {
-    headers,
+    headers: canonicalTraceHeaders(headers),
     payload: payload.toString('base64'),
   };
   return JSON.stringify(env);
@@ -47,8 +50,26 @@ export function unmarshalEnvelope(data: Buffer | string): Envelope | null {
     if (e.headers === null) {
       e.headers = {};
     }
+    e.headers = canonicalTraceHeaders(e.headers);
     return e;
   } catch {
     return null;
   }
+}
+
+export function canonicalTraceHeaders(headers: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (typeof headers !== 'object' || headers === null) {
+    return out;
+  }
+  for (const [k, v] of Object.entries(headers)) {
+    if (typeof v !== 'string') {
+      continue;
+    }
+    const key = k.toLowerCase();
+    if (key === TRACEPARENT_HEADER || key === TRACESTATE_HEADER) {
+      out[key] = v;
+    }
+  }
+  return out;
 }

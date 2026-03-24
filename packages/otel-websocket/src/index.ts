@@ -16,6 +16,18 @@ export {
   otelContext,
 } from './conn';
 export type { Options } from './options';
-export { marshalEnvelope, unmarshalEnvelope } from './message';
+export {
+  TRACESTATE_HEADER,
+  TRACEPARENT_HEADER,
+  canonicalTraceHeaders,
+  marshalEnvelope,
+  unmarshalEnvelope,
+} from './message';
 export type { Envelope } from './message';
+export {
+  extractMessageContext,
+  parseIncomingMessage,
+  traceIdFromTraceparent,
+} from './browser';
+export type { IncomingMessageFormat, ParsedIncomingMessage } from './browser';
 export { semVersion, version } from './version';
