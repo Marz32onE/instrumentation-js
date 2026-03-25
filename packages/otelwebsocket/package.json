@@ -1,12 +1,22 @@
 {
-  "name": "@marz32one/otel-websocket",
+  "name": "@marz32one/otelwebsocket",
   "version": "0.1.0",
-  "description": "OpenTelemetry trace-context propagation for WebSocket connections (TypeScript port of instrumentation-go/otel-websocket)",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "description": "RxJS webSocket-aligned OpenTelemetry trace propagation (embedded + header envelope; compatible with instrumentation-go/otel-websocket)",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
   "exports": {
-    ".": "./dist/index.js",
-    "./browser": "./src/browser.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./webSocket": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
   },
   "files": [
     "dist/**/*",
@@ -14,7 +24,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "jest",
+    "test": "NODE_OPTIONS=--experimental-vm-modules jest",
     "lint": "tsc --noEmit",
     "prepublishOnly": "npm run build"
   },
@@ -22,6 +32,7 @@
     "opentelemetry",
     "otel",
     "websocket",
+    "rxjs",
     "tracing",
     "instrumentation",
     "w3c-trace-context"
@@ -30,7 +41,7 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
-    "ws": "^8.18.0"
+    "rxjs": "^7.8.0"
   },
   "devDependencies": {
     "@opentelemetry/core": "^2.6.0",
@@ -40,6 +51,7 @@
     "@types/ws": "^8.18.0",
     "jest": "^29.7.0",
     "ts-jest": "^29.4.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "ws": "^8.18.0"
   }
 }
