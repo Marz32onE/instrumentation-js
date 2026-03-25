@@ -22,4 +22,4 @@ clean:
 
 # Dry-run publish (verify package contents without uploading)
 publish-dry:
-	cd packages/otelwebsocket && npm pack --dry-run
+	cd packages/otel-rxjs-ws && npm pack --dry-run

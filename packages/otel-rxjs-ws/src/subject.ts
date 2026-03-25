@@ -58,7 +58,7 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
 
     this._userSerializer = userSerializer ?? null;
     this._userDeserializer = userDeserializer ?? null;
-    this._tracer = getTracerProvider().getTracer('@marz32one/otelwebsocket', version());
+    this._tracer = getTracerProvider().getTracer('@marz32one/otel-rxjs-ws', version());
   }
 
   override next(value?: T): void {

@@ -1,18 +1,13 @@
 {
-  "name": "@marz32one/otelwebsocket",
+  "name": "@marz32one/otel-ws",
   "version": "0.1.0",
-  "description": "RxJS webSocket-aligned OpenTelemetry trace propagation (embedded + header envelope; compatible with instrumentation-go/otel-websocket)",
+  "description": "Native ws OpenTelemetry trace propagation (embedded + header envelope; compatible with instrumentation-go/otel-gorilla-ws)",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "sideEffects": false,
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "default": "./dist/index.js"
-    },
-    "./webSocket": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
@@ -32,7 +27,7 @@
     "opentelemetry",
     "otel",
     "websocket",
-    "rxjs",
+    "ws",
     "tracing",
     "instrumentation",
     "w3c-trace-context"
@@ -41,7 +36,7 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
-    "rxjs": "^7.8.0"
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@opentelemetry/core": "^2.6.0",
@@ -51,7 +46,6 @@
     "@types/ws": "^8.18.0",
     "jest": "^29.7.0",
     "ts-jest": "^29.4.0",
-    "typescript": "^5.7.0",
-    "ws": "^8.18.0"
+    "typescript": "^5.7.0"
   }
 }

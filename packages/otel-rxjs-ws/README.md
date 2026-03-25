@@ -1,6 +1,6 @@
-# @marz32one/otelwebsocket
+# @marz32one/otel-rxjs-ws
 
-RxJS **`webSocket`-style** OpenTelemetry instrumentation, aligned with [`instrumentation-go/otel-websocket`](https://github.com/Marz32onE/instrumentation-go/tree/main/otel-websocket).
+RxJS **`webSocket`-style** OpenTelemetry instrumentation, aligned with [`instrumentation-go/otel-gorilla-ws`](https://github.com/Marz32onE/instrumentation-go/tree/main/otel-gorilla-ws).
 
 This package is **ESM-only** (`"type": "module"`). Run `npm run build` so `dist/` exists before consuming from `file:` or npm.
 
@@ -14,14 +14,14 @@ This package is **ESM-only** (`"type": "module"`). Run `npm run build` so `dist/
 ## Install
 
 ```bash
-npm install @marz32one/otelwebsocket @opentelemetry/api rxjs
+npm install @marz32one/otel-rxjs-ws @opentelemetry/api rxjs
 ```
 
 ## Usage
 
 ```typescript
-import { webSocket } from '@marz32one/otelwebsocket/webSocket';
-// same as: import { webSocket } from '@marz32one/otelwebsocket';
+import { webSocket } from '@marz32one/otel-rxjs-ws/webSocket';
+// same as: import { webSocket } from '@marz32one/otel-rxjs-ws';
 
 const ws = webSocket<MyType>({ url: 'ws://localhost:8082/ws' });
 ws.subscribe({ next: console.log, error: console.error });

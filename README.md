@@ -6,15 +6,15 @@ OpenTelemetry instrumentation packages for JavaScript/TypeScript.
 
 | Package | Description |
 |---------|-------------|
-| [`@marz32one/otelwebsocket`](packages/otelwebsocket) | ESM-only; RxJS `webSocket`-style API + W3C Trace Context in the message body |
+| [`@marz32one/otel-rxjs-ws`](packages/otel-rxjs-ws) | ESM-only; RxJS `webSocket`-style API + W3C Trace Context in the message body |
 
 ---
 
-## @marz32one/otelwebsocket
+## @marz32one/otel-rxjs-ws
 
-Aligned with [`instrumentation-go/otel-websocket`](https://github.com/Marz32onE/instrumentation-go/tree/main/otel-websocket) wire formats: **embedded** JSON (default) and **header-style** envelope (receive compat).
+Aligned with [`instrumentation-go/otel-gorilla-ws`](https://github.com/Marz32onE/instrumentation-go/tree/main/otel-gorilla-ws) wire formats: **embedded** JSON (default) and **header-style** envelope (receive compat).
 
-Import like RxJS: `import { webSocket } from '@marz32one/otelwebsocket/webSocket'`.
+Import like RxJS: `import { webSocket } from '@marz32one/otel-rxjs-ws/webSocket'`.
 
 ### How it works
 
@@ -32,14 +32,14 @@ Default embedded body:
 ### Installation
 
 ```bash
-npm install @marz32one/otelwebsocket @opentelemetry/api rxjs
+npm install @marz32one/otel-rxjs-ws @opentelemetry/api rxjs
 ```
 
 ### Quick start
 
 ```typescript
 import { context, trace } from '@opentelemetry/api';
-import { webSocket } from '@marz32one/otelwebsocket/webSocket';
+import { webSocket } from '@marz32one/otel-rxjs-ws/webSocket';
 
 const ws = webSocket<{ text: string }>({ url: 'ws://localhost:8082/ws' });
 
@@ -106,6 +106,6 @@ make clean
 ### Publishing
 
 ```bash
-cd packages/otelwebsocket
+cd packages/otel-rxjs-ws
 npm publish --access public
 ```
