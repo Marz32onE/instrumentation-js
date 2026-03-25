@@ -27,9 +27,15 @@ import { version } from './version.js';
  * exactly like `rxjs/webSocket`.
  */
 class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
+  // Queue of send contexts: one pushed per next() call, shifted when the serializer runs.
+  // Array is necessary because RxJS may buffer messages when the socket is not yet OPEN,
+  // delaying serialization until after next() returns.
   private readonly _pendingSendContexts: Context[] = [];
 
-  private _pendingReceiveCtx: Context | undefined;
+  // Queue of receive contexts, one pushed per incoming message and shifted per
+  // subscriber next() call. Keeps consecutive messages from sharing a single field.
+  private readonly _pendingReceiveCtxs: Context[] = [];
+
   private readonly _tracer: ReturnType<ReturnType<typeof getTracerProvider>['getTracer']>;
   private readonly _userSerializer: NonNullable<
     WebSocketSubjectConfig<T>['serializer']
@@ -63,10 +69,15 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
 
   override next(value?: T): void {
     this._pendingSendContexts.push(otelContext.active());
+    const lenBefore = this._pendingSendContexts.length;
     try {
       super.next(value!);
     } catch (err) {
-      this._pendingSendContexts.pop();
+      // Only remove the context we just pushed if the serializer didn't already shift it.
+      // The serializer shifts the context, so if length is unchanged, serialization never ran.
+      if (this._pendingSendContexts.length === lenBefore) {
+        this._pendingSendContexts.pop();
+      }
       throw err;
     }
   }
@@ -74,7 +85,7 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
   protected _subscribe(subscriber: Subscriber<T>): Subscription {
     const wrapped = new Subscriber<T>({
       next: (value: T) => {
-        const ctx = this._pendingReceiveCtx;
+        const ctx = this._pendingReceiveCtxs.shift();
         if (ctx) {
           otelContext.with(ctx, () => {
             subscriber.next(value);
@@ -196,12 +207,6 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
       senderCtx,
     );
     const outCtx = trace.setSpan(senderCtx, span);
-    span.end();
-
-    this._pendingReceiveCtx = outCtx;
-    queueMicrotask(() => {
-      this._pendingReceiveCtx = undefined;
-    });
 
     let result = parsed.data as T;
     if (this._userDeserializer) {
@@ -210,8 +215,18 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
           ? JSON.stringify(result)
           : String(result);
       const synthetic = { ...e, data: payload } as MessageEvent;
-      result = this._userDeserializer(synthetic);
+      try {
+        result = this._userDeserializer(synthetic);
+      } catch (err) {
+        span.recordException(err as Error);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+        span.end();
+        throw err;
+      }
     }
+
+    span.end();
+    this._pendingReceiveCtxs.push(outCtx);
     return result;
   }
 }

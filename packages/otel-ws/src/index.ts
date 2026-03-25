@@ -2,6 +2,7 @@ import {
   Context,
   Link,
   SpanKind,
+  SpanStatusCode,
   context as otelContext,
   defaultTextMapGetter,
   defaultTextMapSetter,
@@ -65,6 +66,7 @@ export function instrumentSocket<TSend = unknown, TReceive = unknown>(
     );
     const spanCtx = trace.setSpan(activeCtx, span);
 
+    let serialized: string;
     try {
       const carrier: Record<string, string> = {};
       propagation.inject(spanCtx, carrier, defaultTextMapSetter);
@@ -75,10 +77,25 @@ export function instrumentSocket<TSend = unknown, TReceive = unknown>(
       if (tp) wire.traceparent = tp;
       if (ts) wire.tracestate = ts;
 
-      ws.send(JSON.stringify(wire), cb);
-    } finally {
+      serialized = JSON.stringify(wire);
+    } catch (err) {
+      span.recordException(err as Error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
       span.end();
+      cb?.(err as Error);
+      return;
     }
+
+    ws.send(serialized, (sendErr) => {
+      if (sendErr) {
+        span.recordException(sendErr);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: sendErr.message });
+      } else {
+        span.setStatus({ code: SpanStatusCode.OK });
+      }
+      span.end();
+      cb?.(sendErr);
+    });
   };
 
   const onMessage = (handler: MessageHandler<TReceive>) => {

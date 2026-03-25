@@ -30,7 +30,13 @@ export interface ParsedWireMessage<T = unknown> {
  */
 export function deserializeMessage<T = unknown>(raw: string): ParsedWireMessage<T> {
   try {
-    const obj = JSON.parse(raw) as Record<string, unknown>;
+    const parsed = JSON.parse(raw) as unknown;
+
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return { data: parsed as unknown as T };
+    }
+
+    const obj = parsed as Record<string, unknown>;
 
     if ('data' in obj) {
       return {
@@ -42,7 +48,12 @@ export function deserializeMessage<T = unknown>(raw: string): ParsedWireMessage<
 
     if (isEnvelope(obj)) {
       const headers = obj.headers as Record<string, unknown>;
-      const payloadStr = decodeBase64(obj.payload as string);
+      let payloadStr: string;
+      try {
+        payloadStr = decodeBase64(obj.payload as string);
+      } catch {
+        return { data: raw as unknown as T };
+      }
       let data: T;
       try {
         data = JSON.parse(payloadStr) as T;
@@ -111,5 +122,5 @@ export function decodeBase64(s: string): string {
       /* fall through */
     }
   }
-  return s;
+  throw new Error('decodeBase64: no decoder available or invalid base64 input');
 }

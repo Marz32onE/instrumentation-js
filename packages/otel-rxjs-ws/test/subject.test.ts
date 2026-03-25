@@ -13,6 +13,7 @@ import {
 import {
   ROOT_CONTEXT,
   SpanKind,
+  SpanStatusCode,
   context,
   propagation,
   trace,
@@ -303,5 +304,73 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     sub.unsubscribe();
     ws.complete();
     await server.close();
+  });
+
+  it('records ERROR status when custom deserializer throws', async () => {
+    const msg = JSON.stringify({
+      traceparent: '00-12345678901234567890123456789012-0123456789012345-01',
+      data: 'boom',
+    });
+    const server = startSendingServer(msg);
+    const ws = webSocket<string>({
+      url: `ws://127.0.0.1:${server.port}`,
+      WebSocketCtor: WS_CTOR,
+      deserializer: () => {
+        throw new Error('deserializer failed');
+      },
+    });
+
+    await new Promise<void>((resolve) => {
+      ws.subscribe({ error: () => resolve() });
+    });
+
+    const spans = exporter.getFinishedSpans();
+    const recvSpan = spans.find((s) => s.name === 'websocket.receive');
+    expect(recvSpan).toBeDefined();
+    expect(recvSpan!.status.code).toBe(SpanStatusCode.ERROR);
+    expect(recvSpan!.events.some((e) => e.name === 'exception')).toBeTruthy();
+
+    ws.complete();
+    await server.close();
+  });
+
+  it('provides correct receive context for two consecutive messages', async () => {
+    const msg1 = JSON.stringify({
+      traceparent: '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0000000000000001-01',
+      data: 'first',
+    });
+    const msg2 = JSON.stringify({
+      traceparent: '00-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-0000000000000002-01',
+      data: 'second',
+    });
+
+    const wss = new (await import('ws')).WebSocketServer({ port: 0 });
+    wss.on('connection', (client) => {
+      setTimeout(() => client.send(msg1), 20);
+      setTimeout(() => client.send(msg2), 40);
+    });
+    const { port } = wss.address() as import('net').AddressInfo;
+
+    const ws = webSocket<string>({
+      url: `ws://127.0.0.1:${port}`,
+      WebSocketCtor: WS_CTOR,
+    });
+
+    const receivedTraceIds: (string | undefined)[] = [];
+    await new Promise<void>((resolve) => {
+      let count = 0;
+      ws.subscribe({
+        next: () => {
+          receivedTraceIds.push(trace.getSpanContext(context.active())?.traceId);
+          if (++count === 2) resolve();
+        },
+      });
+    });
+
+    expect(receivedTraceIds[0]).toBe('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    expect(receivedTraceIds[1]).toBe('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+
+    ws.complete();
+    await new Promise<void>((r) => wss.close(() => r()));
   });
 });
