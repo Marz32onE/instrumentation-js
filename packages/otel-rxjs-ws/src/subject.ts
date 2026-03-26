@@ -1,12 +1,10 @@
 import {
   Context,
-  Link,
   SpanKind,
   SpanStatusCode,
   context as otelContext,
   defaultTextMapGetter,
   defaultTextMapSetter,
-  isSpanContextValid,
   propagation,
   trace,
 } from '@opentelemetry/api';
@@ -188,12 +186,6 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
       ? propagation.extract(baseCtx, carrier, defaultTextMapGetter)
       : baseCtx;
 
-    const links: Link[] = [];
-    const senderSc = trace.getSpanContext(senderCtx);
-    if (senderSc && isSpanContextValid(senderSc)) {
-      links.push({ context: senderSc });
-    }
-
     const span = this._tracer.startSpan(
       'websocket.receive',
       {
@@ -202,7 +194,6 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
           'messaging.system': 'websocket',
           'messaging.operation': 'receive',
         },
-        links,
       },
       senderCtx,
     );

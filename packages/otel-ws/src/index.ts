@@ -1,16 +1,14 @@
 import {
   Context,
-  Link,
   SpanKind,
   SpanStatusCode,
   context as otelContext,
   defaultTextMapGetter,
   defaultTextMapSetter,
-  isSpanContextValid,
   propagation,
   trace,
 } from '@opentelemetry/api';
-import WebSocket, { RawData } from 'ws';
+import WebSocket from 'ws';
 
 import {
   TRACEPARENT_HEADER,
@@ -99,7 +97,7 @@ export function instrumentSocket<TSend = unknown, TReceive = unknown>(
   };
 
   const onMessage = (handler: MessageHandler<TReceive>) => {
-    const listener = (raw: RawData) => {
+    const listener = (raw: WebSocket.Data) => {
       const body =
         typeof raw === 'string'
           ? raw
@@ -118,12 +116,6 @@ export function instrumentSocket<TSend = unknown, TReceive = unknown>(
         ? propagation.extract(baseCtx, carrier, defaultTextMapGetter)
         : baseCtx;
 
-      const links: Link[] = [];
-      const senderSc = trace.getSpanContext(senderCtx);
-      if (senderSc && isSpanContextValid(senderSc)) {
-        links.push({ context: senderSc });
-      }
-
       const span = tracer.startSpan(
         'websocket.receive',
         {
@@ -132,7 +124,6 @@ export function instrumentSocket<TSend = unknown, TReceive = unknown>(
             'messaging.system': 'websocket',
             'messaging.operation': 'receive',
           },
-          links,
         },
         senderCtx,
       );

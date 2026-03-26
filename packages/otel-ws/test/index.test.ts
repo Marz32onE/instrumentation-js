@@ -11,7 +11,7 @@ import {
   SimpleSpanProcessor,
 } from '@opentelemetry/sdk-trace-node';
 import { ROOT_CONTEXT, SpanStatusCode, context, propagation, trace } from '@opentelemetry/api';
-import WebSocket, { WebSocketServer } from 'ws';
+import WebSocket from 'ws';
 
 import { connect, instrumentSocket } from '../src/index.js';
 
@@ -53,7 +53,7 @@ describe('otel-ws', () => {
   it('injects traceparent on send (client)', async () => {
     let resolveFirst: ((msg: string) => void) | null = null;
     const firstMessage = new Promise<string>((resolve) => (resolveFirst = resolve));
-    const wss = new WebSocketServer({ port: 0 });
+    const wss = new WebSocket.Server({ port: 0 });
     wss.on('connection', (ws) => {
       ws.on('message', (data) => {
         if (resolveFirst) resolveFirst(data.toString());
@@ -80,7 +80,7 @@ describe('otel-ws', () => {
   });
 
   it('extracts context on receive and creates consumer span', async () => {
-    const wss = new WebSocketServer({ port: 0 });
+    const wss = new WebSocket.Server({ port: 0 });
     wss.on('connection', (ws) => {
       setTimeout(() => {
         ws.send(
@@ -112,7 +112,7 @@ describe('otel-ws', () => {
   });
 
   it('records error and sets ERROR status when send fails', async () => {
-    const wss = new WebSocketServer({ port: 0 });
+    const wss = new WebSocket.Server({ port: 0 });
     const port = (wss.address() as AddressInfo).port;
     const client = await connect(`ws://127.0.0.1:${port}`);
 
@@ -141,7 +141,7 @@ describe('otel-ws', () => {
     const payload = Buffer.from(
       JSON.stringify({ body: 'envelope-test' }),
     ).toString('base64');
-    const wss = new WebSocketServer({ port: 0 });
+    const wss = new WebSocket.Server({ port: 0 });
     wss.on('connection', (ws) => {
       setTimeout(() => {
         ws.send(
@@ -175,7 +175,7 @@ describe('otel-ws', () => {
   });
 
   it('handles plain text message without trace context', async () => {
-    const wss = new WebSocketServer({ port: 0 });
+    const wss = new WebSocket.Server({ port: 0 });
     wss.on('connection', (ws) => {
       setTimeout(() => ws.send('plain text'), 20);
     });
