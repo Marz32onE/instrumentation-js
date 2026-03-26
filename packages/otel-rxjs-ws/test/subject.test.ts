@@ -112,7 +112,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     teardown();
   });
 
-  it('embeds traceparent in the JSON body on next()', async () => {
+  it('sends header-style envelope with traceparent on next()', async () => {
     const server = startCaptureServer();
     const ws = webSocket<{ body: string }>({
       url: `ws://127.0.0.1:${server.port}`,
@@ -132,9 +132,11 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const raw = await server.firstMessage;
     const parsed = JSON.parse(raw);
 
-    expect(parsed.traceparent).toBeDefined();
-    expect(parsed.traceparent).toContain(span.spanContext().traceId);
-    expect(parsed.data).toEqual({ body: 'hello' });
+    expect(parsed.headers?.traceparent).toBeDefined();
+    expect(parsed.headers.traceparent).toContain(span.spanContext().traceId);
+    expect(
+      JSON.parse(Buffer.from(parsed.payload, 'base64').toString('utf8')),
+    ).toEqual({ body: 'hello' });
 
     span.end();
     sub.unsubscribe();
@@ -299,8 +301,10 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     ws.next({ x: 1 });
     const raw = await server.firstMessage;
     const parsed = JSON.parse(raw);
-    expect(parsed.data).toEqual({ x: 1 });
-    expect(parsed.traceparent).toBeDefined();
+    expect(parsed.headers?.traceparent).toBeDefined();
+    expect(
+      JSON.parse(Buffer.from(parsed.payload, 'base64').toString('utf8')),
+    ).toEqual({ x: 1 });
     sub.unsubscribe();
     ws.complete();
     await server.close();
@@ -330,6 +334,29 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     expect(recvSpan!.status.code).toBe(SpanStatusCode.ERROR);
     expect(recvSpan!.events.some((e) => e.name === 'exception')).toBeTruthy();
 
+    ws.complete();
+    await server.close();
+  });
+
+  it('keeps protocol payload structure in envelope payload (DDP compat)', async () => {
+    const server = startCaptureServer();
+    const ws = webSocket<{ msg: string; version: string; support: string[] }>({
+      url: `ws://127.0.0.1:${server.port}`,
+      WebSocketCtor: WS_CTOR,
+    });
+    const sub = ws.subscribe();
+
+    ws.next({ msg: 'connect', version: '1', support: ['1'] });
+    const raw = await server.firstMessage;
+    const parsed = JSON.parse(raw);
+    const payload = JSON.parse(
+      Buffer.from(parsed.payload, 'base64').toString('utf8'),
+    );
+
+    expect(payload).toEqual({ msg: 'connect', version: '1', support: ['1'] });
+    expect(payload.data).toBeUndefined();
+
+    sub.unsubscribe();
     ws.complete();
     await server.close();
   });

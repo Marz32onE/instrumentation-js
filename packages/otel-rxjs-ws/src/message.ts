@@ -73,6 +73,19 @@ export function deserializeMessage<T = unknown>(raw: string): ParsedWireMessage<
   }
 }
 
+/** Build header-style envelope with base64 payload from arbitrary data. */
+export function toEnvelope(
+  data: unknown,
+  headers: Record<string, string>,
+): Envelope {
+  const payloadString =
+    typeof data === 'string' ? data : JSON.stringify(data);
+  return {
+    headers: canonicalTraceHeaders(headers),
+    payload: encodeBase64(payloadString),
+  };
+}
+
 /** Keep only traceparent and tracestate, lowercased. */
 export function canonicalTraceHeaders(
   headers: Record<string, unknown>,
@@ -123,4 +136,22 @@ export function decodeBase64(s: string): string {
     }
   }
   throw new Error('decodeBase64: no decoder available or invalid base64 input');
+}
+
+export function encodeBase64(s: string): string {
+  if (typeof btoa === 'function') {
+    try {
+      return btoa(s);
+    } catch {
+      /* fall through */
+    }
+  }
+  if (typeof Buffer !== 'undefined') {
+    try {
+      return Buffer.from(s, 'utf8').toString('base64');
+    } catch {
+      /* fall through */
+    }
+  }
+  throw new Error('encodeBase64: no encoder available');
 }
