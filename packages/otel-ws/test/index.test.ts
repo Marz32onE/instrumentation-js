@@ -69,10 +69,14 @@ describe('otel-ws', () => {
     });
 
     const raw = await firstMessage;
-    const parsed = JSON.parse(raw) as { traceparent?: string; data: unknown };
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+
+    // flat format: traceparent injected alongside original fields
     expect(parsed.traceparent).toBeDefined();
-    expect(parsed.traceparent).toContain(span.spanContext().traceId);
-    expect(parsed.data).toEqual({ hello: 'world' });
+    expect(parsed.traceparent as string).toContain(span.spanContext().traceId);
+    expect(parsed.hello).toBe('world');
+    expect(parsed.data).toBeUndefined();
+    expect(parsed.payload).toBeUndefined();
 
     span.end();
     client.close();
@@ -85,9 +89,8 @@ describe('otel-ws', () => {
       setTimeout(() => {
         ws.send(
           JSON.stringify({
-            traceparent:
-              '00-12345678901234567890123456789012-0123456789012345-01',
-            data: { body: 'from server' },
+            traceparent: '00-12345678901234567890123456789012-0123456789012345-01',
+            body: 'from server',
           }),
         );
       }, 20);
@@ -134,43 +137,6 @@ describe('otel-ws', () => {
     expect(sendSpan!.status.code).toBe(SpanStatusCode.ERROR);
     expect(sendSpan!.events.some((e) => e.name === 'exception')).toBeTruthy();
 
-    await new Promise<void>((r) => wss.close(() => r()));
-  });
-
-  it('handles header-style envelope on receive', async () => {
-    const payload = Buffer.from(
-      JSON.stringify({ body: 'envelope-test' }),
-    ).toString('base64');
-    const wss = new WebSocket.Server({ port: 0 });
-    wss.on('connection', (ws) => {
-      setTimeout(() => {
-        ws.send(
-          JSON.stringify({
-            headers: {
-              traceparent:
-                '00-aabbccddaabbccddaabbccddaabbccdd-0011223344556677-01',
-            },
-            payload,
-          }),
-        );
-      }, 20);
-    });
-    const port = (wss.address() as AddressInfo).port;
-    const raw = new WebSocket(`ws://127.0.0.1:${port}`);
-    await new Promise<void>((resolve) => raw.once('open', () => resolve()));
-
-    const socket = instrumentSocket<unknown, { body: string }>(raw);
-    const received = await new Promise<{ body: string }>((resolve) => {
-      socket.onMessage((data) => resolve(data as { body: string }));
-    });
-
-    expect(received).toEqual({ body: 'envelope-test' });
-    const spans = exporter.getFinishedSpans();
-    const recvSpan = spans.find((s) => s.name === 'websocket.receive');
-    expect(recvSpan).toBeDefined();
-    expect(recvSpan!.spanContext().traceId).toBe('aabbccddaabbccddaabbccddaabbccdd');
-
-    socket.close();
     await new Promise<void>((r) => wss.close(() => r()));
   });
 

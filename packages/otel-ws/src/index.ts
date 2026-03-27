@@ -13,8 +13,8 @@ import WebSocket from 'ws';
 import {
   TRACEPARENT_HEADER,
   TRACESTATE_HEADER,
-  WireMessage,
   deserializeMessage,
+  injectTrace,
 } from './message.js';
 import { getTracerProvider } from './options.js';
 import { version } from './version.js';
@@ -68,14 +68,7 @@ export function instrumentSocket<TSend = unknown, TReceive = unknown>(
     try {
       const carrier: Record<string, string> = {};
       propagation.inject(spanCtx, carrier, defaultTextMapSetter);
-
-      const wire: WireMessage<TSend> = { data };
-      const tp = carrier[TRACEPARENT_HEADER];
-      const ts = carrier[TRACESTATE_HEADER];
-      if (tp) wire.traceparent = tp;
-      if (ts) wire.tracestate = ts;
-
-      serialized = JSON.stringify(wire);
+      serialized = JSON.stringify(injectTrace(data, carrier));
     } catch (err) {
       span.recordException(err as Error);
       span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });

@@ -1,23 +1,39 @@
 export const TRACEPARENT_HEADER = 'traceparent';
 export const TRACESTATE_HEADER = 'tracestate';
 
-export interface WireMessage<T = unknown> {
-  traceparent?: string;
-  tracestate?: string;
-  data: T;
-}
-
-export interface Envelope {
-  headers: Record<string, string>;
-  payload: string;
-}
-
+/** Result of parsing an incoming wire message. */
 export interface ParsedWireMessage<T = unknown> {
   data: T;
   traceparent?: string;
   tracestate?: string;
 }
 
+/**
+ * Inject trace headers into a JSON object payload (flat format).
+ * Non-object payloads (string, array, etc.) are returned unchanged — no trace injection.
+ */
+export function injectTrace(
+  data: unknown,
+  headers: Record<string, string>,
+): unknown {
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+    return data;
+  }
+  const out = { ...(data as Record<string, unknown>) };
+  const tp = headers[TRACEPARENT_HEADER];
+  const ts = headers[TRACESTATE_HEADER];
+  if (tp) out[TRACEPARENT_HEADER] = tp;
+  if (ts) out[TRACESTATE_HEADER] = ts;
+  return out;
+}
+
+/**
+ * Deserialize an incoming wire message (flat format).
+ *
+ * If the message is a JSON object, `traceparent` and `tracestate` are extracted
+ * and the remaining fields are returned as `data`.
+ * Any other value (string, array, non-JSON) is returned as `data` with no trace fields.
+ */
 export function deserializeMessage<T = unknown>(raw: string): ParsedWireMessage<T> {
   try {
     const parsed = JSON.parse(raw) as unknown;
@@ -27,68 +43,22 @@ export function deserializeMessage<T = unknown>(raw: string): ParsedWireMessage<
     }
 
     const obj = parsed as Record<string, unknown>;
+    const traceparent = asString(obj[TRACEPARENT_HEADER]);
+    const tracestate = asString(obj[TRACESTATE_HEADER]);
 
-    if ('data' in obj) {
-      return {
-        data: obj.data as T,
-        traceparent: asString(obj[TRACEPARENT_HEADER]),
-        tracestate: asString(obj[TRACESTATE_HEADER]),
-      };
+    const rest: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (k !== TRACEPARENT_HEADER && k !== TRACESTATE_HEADER) {
+        rest[k] = v;
+      }
     }
 
-    if (isEnvelope(obj)) {
-      const headers = obj.headers as Record<string, unknown>;
-      let payloadStr: string;
-      try {
-        payloadStr = decodeBase64(obj.payload as string);
-      } catch {
-        return { data: raw as unknown as T };
-      }
-      let data: T;
-      try {
-        data = JSON.parse(payloadStr) as T;
-      } catch {
-        data = payloadStr as unknown as T;
-      }
-      return {
-        data,
-        traceparent: asString(headers[TRACEPARENT_HEADER]),
-        tracestate: asString(headers[TRACESTATE_HEADER]),
-      };
-    }
-
-    return { data: obj as unknown as T };
+    return { data: rest as unknown as T, traceparent, tracestate };
   } catch {
     return { data: raw as unknown as T };
   }
 }
 
-function isEnvelope(obj: Record<string, unknown>): boolean {
-  return (
-    typeof obj.headers === 'object' &&
-    obj.headers !== null &&
-    typeof obj.payload === 'string'
-  );
-}
-
 function asString(v: unknown): string | undefined {
   return typeof v === 'string' && v.length > 0 ? v : undefined;
-}
-
-export function decodeBase64(s: string): string {
-  if (typeof atob === 'function') {
-    try {
-      return atob(s);
-    } catch {
-      /* fall through */
-    }
-  }
-  if (typeof Buffer !== 'undefined') {
-    try {
-      return Buffer.from(s, 'base64').toString('utf8');
-    } catch {
-      /* fall through */
-    }
-  }
-  throw new Error('decodeBase64: no decoder available or invalid base64 input');
 }
