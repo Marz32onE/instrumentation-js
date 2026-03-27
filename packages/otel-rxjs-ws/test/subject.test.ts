@@ -112,7 +112,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     teardown();
   });
 
-  it('sends header-style envelope with traceparent on next()', async () => {
+  it('sends flat format with traceparent injected into object on next()', async () => {
     const server = startCaptureServer();
     const ws = webSocket<{ body: string }>({
       url: `ws://127.0.0.1:${server.port}`,
@@ -132,11 +132,11 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const raw = await server.firstMessage;
     const parsed = JSON.parse(raw);
 
-    expect(parsed.headers?.traceparent).toBeDefined();
-    expect(parsed.headers.traceparent).toContain(span.spanContext().traceId);
-    expect(
-      JSON.parse(Buffer.from(parsed.payload, 'base64').toString('utf8')),
-    ).toEqual({ body: 'hello' });
+    expect(parsed.traceparent).toBeDefined();
+    expect(parsed.traceparent).toContain(span.spanContext().traceId);
+    expect(parsed.body).toBe('hello');
+    expect(parsed.headers).toBeUndefined();
+    expect(parsed.payload).toBeUndefined();
 
     span.end();
     sub.unsubscribe();
@@ -167,9 +167,8 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
 
   it('creates a CONSUMER span on receive', async () => {
     const msg = JSON.stringify({
-      traceparent:
-        '00-12345678901234567890123456789012-0123456789012345-01',
-      data: { body: 'from server' },
+      traceparent: '00-12345678901234567890123456789012-0123456789012345-01',
+      body: 'from server',
     });
     const server = startSendingServer(msg);
     const ws = webSocket<{ body: string }>({
@@ -192,9 +191,8 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
 
   it('sets active context in subscribe next (trace id)', async () => {
     const msg = JSON.stringify({
-      traceparent:
-        '00-12345678901234567890123456789012-0123456789012345-01',
-      data: { body: 'from server' },
+      traceparent: '00-12345678901234567890123456789012-0123456789012345-01',
+      body: 'from server',
     });
     const server = startSendingServer(msg);
     const ws = webSocket<{ body: string }>({
@@ -221,34 +219,9 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     await server.close();
   });
 
-  it('handles header-style envelope on receive', async () => {
-    const payload = Buffer.from(
-      JSON.stringify({ body: 'hello', api: 'Test' }),
-    ).toString('base64');
-    const msg = JSON.stringify({
-      headers: {
-        traceparent:
-          '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01',
-      },
-      payload,
-    });
-    const server = startSendingServer(msg);
-    const ws = webSocket<{ body: string; api: string }>({
-      url: `ws://127.0.0.1:${server.port}`,
-      WebSocketCtor: WS_CTOR,
-    });
-
-    const received = await firstValueFrom(ws.pipe(timeout(TEST_TIMEOUT)));
-
-    expect(received).toEqual({ body: 'hello', api: 'Test' });
-
-    ws.complete();
-    await server.close();
-  });
-
-  it('propagates trace context in a round-trip', async () => {
+  it('propagates trace context in a round-trip (object payload)', async () => {
     const server = startEchoServer();
-    const ws = webSocket<string>({
+    const ws = webSocket<{ body: string }>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
     });
@@ -260,17 +233,36 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const ctx = trace.setSpan(ROOT_CONTEXT, span);
 
     context.with(ctx, () => {
-      ws.next('round-trip');
+      ws.next({ body: 'round-trip' });
     });
 
     const received = await msgPromise;
-    expect(received).toBe('round-trip');
+    expect(received).toEqual({ body: 'round-trip' });
 
     const spans = exporter.getFinishedSpans();
     const recvSpan = spans.find((s) => s.name === 'websocket.receive');
     expect(recvSpan?.spanContext().traceId).toBe(span.spanContext().traceId);
 
     span.end();
+    ws.complete();
+    await server.close();
+  });
+
+  it('non-object payload sent unchanged (no trace injection)', async () => {
+    const server = startCaptureServer();
+    const ws = webSocket<string>({
+      url: `ws://127.0.0.1:${server.port}`,
+      WebSocketCtor: WS_CTOR,
+    });
+
+    const sub = ws.subscribe();
+    ws.next('round-trip');
+    const raw = await server.firstMessage;
+
+    expect(raw).toBe('"round-trip"');
+    expect(raw).not.toContain('traceparent');
+
+    sub.unsubscribe();
     ws.complete();
     await server.close();
   });
@@ -301,10 +293,8 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     ws.next({ x: 1 });
     const raw = await server.firstMessage;
     const parsed = JSON.parse(raw);
-    expect(parsed.headers?.traceparent).toBeDefined();
-    expect(
-      JSON.parse(Buffer.from(parsed.payload, 'base64').toString('utf8')),
-    ).toEqual({ x: 1 });
+    expect(parsed.traceparent).toBeDefined();
+    expect(parsed.x).toBe(1);
     sub.unsubscribe();
     ws.complete();
     await server.close();
@@ -313,7 +303,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
   it('records ERROR status when custom deserializer throws', async () => {
     const msg = JSON.stringify({
       traceparent: '00-12345678901234567890123456789012-0123456789012345-01',
-      data: 'boom',
+      body: 'boom',
     });
     const server = startSendingServer(msg);
     const ws = webSocket<string>({
@@ -338,7 +328,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     await server.close();
   });
 
-  it('keeps protocol payload structure in envelope payload (DDP compat)', async () => {
+  it('keeps all original fields alongside traceparent (flat format)', async () => {
     const server = startCaptureServer();
     const ws = webSocket<{ msg: string; version: string; support: string[] }>({
       url: `ws://127.0.0.1:${server.port}`,
@@ -349,12 +339,13 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     ws.next({ msg: 'connect', version: '1', support: ['1'] });
     const raw = await server.firstMessage;
     const parsed = JSON.parse(raw);
-    const payload = JSON.parse(
-      Buffer.from(parsed.payload, 'base64').toString('utf8'),
-    );
 
-    expect(payload).toEqual({ msg: 'connect', version: '1', support: ['1'] });
-    expect(payload.data).toBeUndefined();
+    expect(parsed.traceparent).toBeDefined();
+    expect(parsed.msg).toBe('connect');
+    expect(parsed.version).toBe('1');
+    expect(parsed.support).toEqual(['1']);
+    expect(parsed.headers).toBeUndefined();
+    expect(parsed.payload).toBeUndefined();
 
     sub.unsubscribe();
     ws.complete();
@@ -364,11 +355,11 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
   it('provides correct receive context for two consecutive messages', async () => {
     const msg1 = JSON.stringify({
       traceparent: '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0000000000000001-01',
-      data: 'first',
+      body: 'first',
     });
     const msg2 = JSON.stringify({
       traceparent: '00-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-0000000000000002-01',
-      data: 'second',
+      body: 'second',
     });
 
     const wss = new (await import('ws')).WebSocketServer({ port: 0 });

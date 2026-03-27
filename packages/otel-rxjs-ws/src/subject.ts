@@ -15,7 +15,7 @@ import {
   TRACEPARENT_HEADER,
   TRACESTATE_HEADER,
   deserializeMessage,
-  toEnvelope,
+  injectTrace,
 } from './message.js';
 import { getTracerProvider } from './options.js';
 import { version } from './version.js';
@@ -153,7 +153,7 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
       if (ts) wireHeaders[TRACESTATE_HEADER] = ts;
 
       span.setStatus({ code: SpanStatusCode.OK });
-      return JSON.stringify(toEnvelope(data, wireHeaders));
+      return JSON.stringify(injectTrace(data, wireHeaders));
     } catch (err) {
       span.recordException(err as Error);
       span.setStatus({
