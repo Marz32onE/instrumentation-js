@@ -5,6 +5,7 @@ import {
   context as otelContext,
   defaultTextMapGetter,
   defaultTextMapSetter,
+  diag,
   propagation,
   trace,
 } from '@opentelemetry/api';
@@ -130,6 +131,7 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
       if (this._userSerializer) {
         const inner = this._userSerializer(value);
         if (typeof inner !== 'string') {
+          diag.warn('[otel-rxjs-ws] _serializeOutgoing: user serializer returned non-string, trace wrapping skipped');
           span.setStatus({
             code: SpanStatusCode.ERROR,
             message: 'non-string serializer output: trace wrapping skipped',
@@ -155,6 +157,7 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
       span.setStatus({ code: SpanStatusCode.OK });
       return JSON.stringify(injectTrace(data, wireHeaders));
     } catch (err) {
+      diag.error('[otel-rxjs-ws] _serializeOutgoing: serialization failed', { error: (err as Error).message });
       span.recordException(err as Error);
       span.setStatus({
         code: SpanStatusCode.ERROR,
@@ -209,6 +212,7 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
       try {
         result = this._userDeserializer(synthetic);
       } catch (err) {
+        diag.error('[otel-rxjs-ws] _deserializeIncoming: user deserializer failed', { error: (err as Error).message });
         span.recordException(err as Error);
         span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
         span.end();

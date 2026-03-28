@@ -1,3 +1,5 @@
+import { diag } from '@opentelemetry/api';
+
 export const TRACEPARENT_HEADER = 'traceparent';
 export const TRACESTATE_HEADER = 'tracestate';
 
@@ -55,7 +57,8 @@ export function deserializeMessage<T = unknown>(raw: string): ParsedWireMessage<
     }
 
     return { data: rest as unknown as T, traceparent, tracestate };
-  } catch {
+  } catch (err) {
+    diag.debug('[otel-rxjs-ws] deserializeMessage: JSON.parse failed, treating as raw string', { error: String(err) });
     return { data: raw as unknown as T };
   }
 }

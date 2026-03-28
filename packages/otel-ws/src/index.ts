@@ -5,6 +5,7 @@ import {
   context as otelContext,
   defaultTextMapGetter,
   defaultTextMapSetter,
+  diag,
   propagation,
   trace,
 } from '@opentelemetry/api';
@@ -70,6 +71,7 @@ export function instrumentSocket<TSend = unknown, TReceive = unknown>(
       propagation.inject(spanCtx, carrier, defaultTextMapSetter);
       serialized = JSON.stringify(injectTrace(data, carrier));
     } catch (err) {
+      diag.error('[otel-ws] websocket.send: serialization failed', { error: (err as Error).message });
       span.recordException(err as Error);
       span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
       span.end();
@@ -79,6 +81,7 @@ export function instrumentSocket<TSend = unknown, TReceive = unknown>(
 
     ws.send(serialized, (sendErr) => {
       if (sendErr) {
+        diag.error('[otel-ws] websocket.send: send failed', { error: sendErr.message });
         span.recordException(sendErr);
         span.setStatus({ code: SpanStatusCode.ERROR, message: sendErr.message });
       } else {
