@@ -75,18 +75,15 @@ Identical to [`rxjs/webSocket`](https://rxjs.dev/api/webSocket): exports only `w
 Native Node.js `ws` wrapper. Same wire format as `otel-rxjs-ws`.
 
 ```typescript
-import { connect, instrumentSocket } from '@marz32one/otel-ws';
+import WebSocket from '@marz32one/otel-ws';
 
-// Option A: create a new connection
-const socket = await connect('ws://localhost:8085/otel-ws');
-
-// Option B: instrument an existing WebSocket
-const socket = instrumentSocket(existingWs);
-
-socket.onMessage((msg, ctx) => {
-  console.log('recv', msg);  // msg = { your: 'payload' } (trace fields stripped)
+const ws = new WebSocket('ws://localhost:8085/otel-ws');
+ws.on('open', () => {
+  ws.send({ text: 'hello' });
 });
-socket.send({ text: 'hello' });
+ws.on('message', (msg) => {
+  console.log('recv', msg);
+});
 ```
 
 ---

@@ -22,35 +22,71 @@ npm install @marz32one/otel-ws @opentelemetry/api ws
 
 ## Usage
 
-### Connect and use
+### Drop-in usage
 
 ```typescript
-import { connect } from '@marz32one/otel-ws';
-
-const socket = await connect('ws://localhost:8085/otel-ws');
-
-socket.onMessage((msg, ctx) => {
-  // msg = { your: 'payload' } — trace fields stripped
-  // ctx = OTel context extracted from the sender's traceparent
-  console.log('recv', msg);
-});
-
-socket.send({ text: 'hello' });
-socket.close();
-```
-
-### Instrument an existing WebSocket
-
-```typescript
-import WebSocket from 'ws';
-import { instrumentSocket } from '@marz32one/otel-ws';
+import WebSocket from '@marz32one/otel-ws';
 
 const ws = new WebSocket('ws://localhost:8085/otel-ws');
-const socket = instrumentSocket(ws);
-
-socket.onMessage((msg, ctx) => console.log(msg));
-socket.send({ text: 'hi' });
+ws.on('open', () => {
+  ws.send({ text: 'hello' });
+});
+ws.on('message', (msg) => {
+  // trace context extracted before handler runs
+  console.log(msg);
+});
 ```
+
+### Server-side socket instrumentation
+
+For `ws.Server`, you can instrument accepted sockets directly:
+
+```typescript
+import WsPkg from 'ws';
+import { instrumentSocket } from '@marz32one/otel-ws';
+
+const wss = new WsPkg.Server({ port: 8085 });
+wss.on('connection', (rawWs) => {
+  const ws = instrumentSocket(rawWs);
+  ws.on('message', (msg) => {
+    // already under extracted context
+    ws.send({ ack: true });
+  });
+});
+```
+
+### Native API coverage
+
+`@marz32one/otel-ws` instruments these native paths automatically:
+
+- `ws.on('message', handler)`:
+  - automatically extracts `traceparent` / `tracestate`
+  - creates `websocket.receive` span
+  - executes your native handler under extracted OTel context
+- `WebSocket.Sender.frame(...) + ws._sender.sendFrame(...)`:
+  - `Sender.frame` remains untouched (still native frame generator)
+  - `_sender.sendFrame` path injects trace context into JSON text-frame payloads and creates `websocket.send` span
+
+```typescript
+const ws = new WebSocket('ws://localhost:8085/otel-ws');
+
+ws.on('message', (data) => {
+  // already under extracted context
+  console.log(data);
+});
+
+const sender = (ws as any)._sender;
+const frame = (WebSocket as any).Sender.frame(
+  Buffer.from(JSON.stringify({ text: 'raw frame' }), 'utf8'),
+  { fin: true, mask: true, opcode: 1, readOnly: false },
+);
+sender.sendFrame([Buffer.concat(frame)]);
+```
+
+### Internal API caution
+
+`ws._sender` and `WebSocket.Sender.frame` are **ws internal APIs** and may change between ws versions.
+`otel-ws` does not patch `Sender.frame`; it only instruments `_sender.sendFrame` and safely skips when internals are unavailable.
 
 ## Spans created
 
