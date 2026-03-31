@@ -15,6 +15,18 @@ import WsPkg from 'ws';
 
 import WebSocket, { instrumentSocket } from '../src/index.js';
 
+const OTEL_WS_PROTOCOL = 'otel-ws';
+
+function createNegotiatingServer(): WsPkg.Server {
+  return new WsPkg.Server({
+    port: 0,
+    handleProtocols: (protocols) => {
+      const list = [...(protocols as Iterable<string>)];
+      return list.includes(OTEL_WS_PROTOCOL) ? OTEL_WS_PROTOCOL : false;
+    },
+  });
+}
+
 function setupOTel() {
   const exporter = new InMemorySpanExporter();
   const provider = new NodeTracerProvider({
@@ -53,7 +65,7 @@ describe('otel-ws', () => {
   it('wraps payload in envelope with traceparent on send (client)', async () => {
     let resolveFirst: ((msg: string) => void) | null = null;
     const firstMessage = new Promise<string>((resolve) => (resolveFirst = resolve));
-    const wss = new WsPkg.Server({ port: 0 });
+    const wss = createNegotiatingServer();
     wss.on('connection', (ws) => {
       ws.on('message', (data) => {
         if (resolveFirst) resolveFirst(data.toString());
@@ -89,7 +101,7 @@ describe('otel-ws', () => {
   });
 
   it('extracts context on receive and creates consumer span', async () => {
-    const wss = new WsPkg.Server({ port: 0 });
+    const wss = createNegotiatingServer();
     wss.on('connection', (ws) => {
       setTimeout(() => {
         ws.send(
@@ -120,7 +132,7 @@ describe('otel-ws', () => {
   });
 
   it('patches native ws.on("message") and keeps extracted context', async () => {
-    const wss = new WsPkg.Server({ port: 0 });
+    const wss = createNegotiatingServer();
     wss.on('connection', (ws) => {
       setTimeout(() => {
         ws.send(
@@ -201,7 +213,7 @@ describe('otel-ws', () => {
   it('wraps non-object payload (string) in envelope via _sender.sendFrame patch', async () => {
     let resolveFirst: ((msg: string) => void) | null = null;
     const firstMessage = new Promise<string>((resolve) => (resolveFirst = resolve));
-    const wss = new WsPkg.Server({ port: 0 });
+    const wss = createNegotiatingServer();
     wss.on('connection', (ws) => {
       ws.on('message', (data) => {
         if (resolveFirst) resolveFirst(data.toString());
@@ -254,7 +266,7 @@ describe('otel-ws', () => {
   });
 
   it('instruments server socket for receive/send/sendFrame', async () => {
-    const wss = new WsPkg.Server({ port: 0 });
+    const wss = createNegotiatingServer();
     const receiveTraceIds: Array<string | undefined> = [];
 
     wss.on('connection', (rawWs) => {
@@ -288,7 +300,7 @@ describe('otel-ws', () => {
 
     const port = (wss.address() as AddressInfo).port;
     const client = await new Promise<WsPkg>((resolve, reject) => {
-      const ws = new WsPkg(`ws://127.0.0.1:${port}`);
+      const ws = new WsPkg(`ws://127.0.0.1:${port}`, OTEL_WS_PROTOCOL);
       ws.once('open', () => resolve(ws));
       ws.once('error', reject);
     });
@@ -322,18 +334,17 @@ describe('otel-ws', () => {
     await new Promise<void>((r) => wss.close(() => r()));
   });
 
-  it('OtelWebSocketServer auto-instruments server sockets on connection', async () => {
-    const { OtelWebSocketServer } = await import('../src/index.js');
-    const wss = new OtelWebSocketServer({ port: 0 });
+  it('OtelWebSocket.Server auto-instruments server sockets on connection', async () => {
+    const wss = new WebSocket.Server({ port: 0 });
     const receiveTraceId = await new Promise<string | undefined>((resolve, reject) => {
       wss.on('connection', (ws) => {
-        // No instrumentSocket call — auto-instrumented by OtelWebSocketServer
+        // No instrumentSocket call — auto-instrumented by OtelWebSocket.Server
         ws.on('message', () => {
           resolve(trace.getSpanContext(context.active())?.traceId);
         });
       });
       const port = (wss.address() as AddressInfo).port;
-      const client = new WsPkg(`ws://127.0.0.1:${port}`);
+      const client = new WsPkg(`ws://127.0.0.1:${port}`, OTEL_WS_PROTOCOL);
       client.once('open', () => {
         client.send(
           JSON.stringify({
@@ -353,17 +364,16 @@ describe('otel-ws', () => {
     await new Promise<void>((r) => wss.close(() => r()));
   });
 
-  it('OtelWebSocketServer sends with trace context injected', async () => {
-    const { OtelWebSocketServer } = await import('../src/index.js');
-    const wss = new OtelWebSocketServer({ port: 0 });
+  it('OtelWebSocket.Server sends with trace context injected', async () => {
+    const wss = new WebSocket.Server({ port: 0 });
     wss.on('connection', (ws) => {
-      // No instrumentSocket call — send is auto-patched
+      // No instrumentSocket call — send is auto-patched by OtelWebSocket.Server
       ws.send({ reply: true });
     });
     const port = (wss.address() as AddressInfo).port;
 
     const wire = await new Promise<string>((resolve, reject) => {
-      const client = new WsPkg(`ws://127.0.0.1:${port}`);
+      const client = new WsPkg(`ws://127.0.0.1:${port}`, OTEL_WS_PROTOCOL);
       client.on('message', (data) => resolve(data.toString()));
       client.once('error', reject);
     });
@@ -406,6 +416,40 @@ describe('otel-ws', () => {
     expect(recvSpan).toBeDefined();
     expect(recvSpan!.parentSpanId).toBeUndefined();
 
+    await new Promise<void>((r) => wss.close(() => r()));
+  });
+
+  it('falls back to passthrough payload when protocol is not negotiated', async () => {
+    let resolveFirst: ((msg: string) => void) | null = null;
+    const firstMessage = new Promise<string>((resolve) => (resolveFirst = resolve));
+    const wss = new WsPkg.Server({
+      port: 0,
+      handleProtocols: (protocols) => {
+        const list = [...(protocols as Iterable<string>)];
+        return list.includes('json') ? 'json' : false;
+      },
+    });
+    wss.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        if (resolveFirst) resolveFirst(data.toString());
+      });
+    });
+    const port = (wss.address() as AddressInfo).port;
+
+    const client = await new Promise<WebSocket>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+      ws.once('open', () => resolve(ws));
+      ws.once('error', reject);
+    });
+
+    client.send('{"hello":"passthrough"}');
+    const wire = await firstMessage;
+    expect(JSON.parse(wire)).toEqual({ hello: 'passthrough' });
+
+    const spans = exporter.getFinishedSpans();
+    expect(spans.some((s) => s.name === 'websocket.send')).toBeTruthy();
+
+    client.close();
     await new Promise<void>((r) => wss.close(() => r()));
   });
 });

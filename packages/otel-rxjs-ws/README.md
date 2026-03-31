@@ -4,15 +4,16 @@ RxJS **`webSocket`-style** OpenTelemetry instrumentation, aligned with [`instrum
 
 This package is **ESM-only** (`"type": "module"`). Run `npm run build` so `dist/` exists before consuming from `file:` or npm.
 
-## Wire format
+## Subprotocol negotiation and wire format
 
-Trace headers are merged into the outgoing JSON object (**flat** — no wrapper key):
+The client offers `otel-ws` automatically via WebSocket subprotocol negotiation.
+Envelope instrumentation is enabled **only** when the server confirms `otel-ws`.
 
 ```json
-{ "your": "payload", "traceparent": "00-…", "tracestate": "…" }
+{ "header": { "traceparent": "00-…", "tracestate": "…" }, "data": { "your": "payload" } }
 ```
 
-On receive, `traceparent` and `tracestate` are extracted from top-level fields; the remainder is returned as the message payload. Non-object messages (arrays, plain text) are passed through without trace extraction.
+When `otel-ws` is not negotiated, behavior is fully passthrough to native RxJS `webSocket` serialization/deserialization (no envelope, no payload shape changes). Send/receive spans are still created.
 
 ## Install
 

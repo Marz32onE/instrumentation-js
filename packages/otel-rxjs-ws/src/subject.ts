@@ -17,9 +17,24 @@ import {
   TRACESTATE_HEADER,
   buildEnvelope,
   deserializeMessage,
-} from '@marz32one/otel-ws-message';
+} from './wire-message.js';
 import { getTracerProvider } from './options.js';
 import { version } from './version.js';
+
+const OTEL_WS_PROTOCOL = 'otel-ws';
+
+function prependOtelProtocol(protocol?: string | string[]): string[] {
+  const base = protocol == null ? [] : Array.isArray(protocol) ? [...protocol] : [protocol];
+  return [OTEL_WS_PROTOCOL, ...base.filter((p) => p !== OTEL_WS_PROTOCOL)];
+}
+
+function defaultSerializer<T>(value: T): string {
+  return JSON.stringify(value);
+}
+
+function defaultDeserializer<T>(event: MessageEvent): T {
+  return JSON.parse(String(event.data)) as T;
+}
 
 /**
  * Internal instrumented subject. Not part of the public API — use {@link webSocket}
@@ -42,6 +57,7 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
   private readonly _userDeserializer: NonNullable<
     WebSocketSubjectConfig<T>['deserializer']
   > | null;
+  private _otelProtocolActive = false;
 
   constructor(urlOrConfig: string | WebSocketSubjectConfig<T>) {
     const holder: { inst?: InstrumentedWebSocketSubject<T> } = {};
@@ -52,8 +68,18 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
     const { serializer: userSerializer, deserializer: userDeserializer, ...rest } =
       configIn;
 
+    const userOpenObserver = configIn.openObserver;
     const merged: WebSocketSubjectConfig<T> = {
       ...rest,
+      protocol: prependOtelProtocol(configIn.protocol),
+      openObserver: {
+        next: (event: Event) => {
+          const target = event.target as { protocol?: string } | null;
+          const protocol = target?.protocol ?? ((holder.inst as unknown as { _socket?: { protocol?: string } })._socket?.protocol);
+          holder.inst!._otelProtocolActive = protocol === OTEL_WS_PROTOCOL;
+          userOpenObserver?.next?.(event);
+        },
+      },
       serializer: (value: T) => holder.inst!._serializeOutgoing(value),
       deserializer: (e: MessageEvent) => holder.inst!._deserializeIncoming(e),
     };
@@ -127,6 +153,14 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
     const spanCtx = trace.setSpan(activeCtx, span);
 
     try {
+      if (!this._otelProtocolActive) {
+        const out = this._userSerializer
+          ? this._userSerializer(value)
+          : defaultSerializer(value);
+        span.setStatus({ code: SpanStatusCode.OK });
+        return out;
+      }
+
       let data: unknown = value;
       if (this._userSerializer) {
         const inner = this._userSerializer(value);
@@ -164,6 +198,36 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
   }
 
   private _deserializeIncoming(e: MessageEvent): T {
+    if (!this._otelProtocolActive) {
+      const span = this._tracer.startSpan(
+        'websocket.receive',
+        {
+          kind: SpanKind.CONSUMER,
+          attributes: {
+            'messaging.system': 'websocket',
+            'messaging.operation': 'receive',
+          },
+        },
+        otelContext.active(),
+      );
+      const outCtx = trace.setSpan(otelContext.active(), span);
+      try {
+        const result = this._userDeserializer
+          ? this._userDeserializer(e)
+          : defaultDeserializer<T>(e);
+        this._pendingReceiveCtxs.push(outCtx);
+        span.setStatus({ code: SpanStatusCode.OK });
+        return result;
+      } catch (err) {
+        diag.error('[otel-rxjs-ws] _deserializeIncoming: deserialization failed', { error: (err as Error).message });
+        span.recordException(err as Error);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+        throw err;
+      } finally {
+        span.end();
+      }
+    }
+
     const raw =
       typeof e.data === 'string' || typeof e.data === 'number'
         ? String(e.data)

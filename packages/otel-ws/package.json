@@ -1,6 +1,6 @@
 {
   "name": "@marz32one/otel-ws",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Native ws OpenTelemetry trace propagation (embedded + header envelope; compatible with instrumentation-go/otel-gorilla-ws)",
   "type": "module",
   "main": "./dist/index.js",
@@ -38,7 +38,6 @@
     "node": ">=14"
   },
   "dependencies": {
-    "@marz32one/otel-ws-message": "*",
     "@opentelemetry/api": "^1.9.0",
     "ws": "5.1.1"
   },

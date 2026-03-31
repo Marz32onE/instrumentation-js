@@ -25,6 +25,7 @@ import { webSocket } from '../src/index.js';
 
 const WS_CTOR = WS as unknown as typeof WebSocket;
 const TEST_TIMEOUT = 5_000;
+const OTEL_WS_PROTOCOL = 'otel-ws';
 
 function setupOTel() {
   const exporter = new InMemorySpanExporter();
@@ -50,8 +51,16 @@ function setupOTel() {
   };
 }
 
-function startEchoServer() {
-  const wss = new WebSocketServer({ port: 0 });
+function startEchoServer(supportsOtel = false) {
+  const wss = new WebSocketServer({
+    port: 0,
+    ...(supportsOtel
+      ? {
+          handleProtocols: (protocols: Set<string>) =>
+            protocols.has(OTEL_WS_PROTOCOL) ? OTEL_WS_PROTOCOL : false,
+        }
+      : {}),
+  });
   wss.on('connection', (ws) => {
     ws.on('message', (data) => ws.send(data.toString()));
   });
@@ -62,13 +71,21 @@ function startEchoServer() {
   };
 }
 
-function startCaptureServer() {
+function startCaptureServer(supportsOtel = false) {
   let resolveFirst: ((msg: string) => void) | null = null;
   const firstMessage = new Promise<string>((resolve) => {
     resolveFirst = resolve;
   });
 
-  const wss = new WebSocketServer({ port: 0 });
+  const wss = new WebSocketServer({
+    port: 0,
+    ...(supportsOtel
+      ? {
+          handleProtocols: (protocols: Set<string>) =>
+            protocols.has(OTEL_WS_PROTOCOL) ? OTEL_WS_PROTOCOL : false,
+        }
+      : {}),
+  });
   wss.on('connection', (ws) => {
     ws.on('message', (data) => {
       const str = data.toString();
@@ -86,8 +103,16 @@ function startCaptureServer() {
   };
 }
 
-function startSendingServer(messageToSend: string) {
-  const wss = new WebSocketServer({ port: 0 });
+function startSendingServer(messageToSend: string, supportsOtel = false) {
+  const wss = new WebSocketServer({
+    port: 0,
+    ...(supportsOtel
+      ? {
+          handleProtocols: (protocols: Set<string>) =>
+            protocols.has(OTEL_WS_PROTOCOL) ? OTEL_WS_PROTOCOL : false,
+        }
+      : {}),
+  });
   wss.on('connection', (ws) => ws.send(messageToSend));
   const port = (wss.address() as AddressInfo).port;
   return {
@@ -113,7 +138,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
   });
 
   it('sends envelope format with traceparent in header on next()', async () => {
-    const server = startCaptureServer();
+    const server = startCaptureServer(true);
     const ws = webSocket<{ body: string }>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
@@ -167,12 +192,50 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     await server.close();
   });
 
+  it('falls back to native serializer when protocol is not negotiated', async () => {
+    let resolveFirst: ((msg: string) => void) | null = null;
+    const firstMessage = new Promise<string>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const wss = new WebSocketServer({
+      port: 0,
+      handleProtocols: (protocols: Set<string>) =>
+        protocols.has('json') ? 'json' : false,
+    });
+    wss.on('connection', (ws) => {
+      ws.on('message', (data) => {
+        if (resolveFirst) {
+          resolveFirst(data.toString());
+          resolveFirst = null;
+        }
+      });
+    });
+    const port = (wss.address() as AddressInfo).port;
+    const ws = webSocket<{ plain: boolean }>({
+      url: `ws://127.0.0.1:${port}`,
+      WebSocketCtor: WS_CTOR,
+      protocol: 'json',
+    });
+    const sub = ws.subscribe();
+    ws.next({ plain: true });
+
+    const raw = await firstMessage;
+    expect(JSON.parse(raw)).toEqual({ plain: true });
+
+    const spans = exporter.getFinishedSpans();
+    expect(spans.some((s) => s.name === 'websocket.send')).toBeTruthy();
+
+    sub.unsubscribe();
+    ws.complete();
+    await new Promise<void>((resolve) => wss.close(() => resolve()));
+  });
+
   it('creates a CONSUMER span on receive', async () => {
     const msg = JSON.stringify({
       header: { traceparent: '00-12345678901234567890123456789012-0123456789012345-01' },
       data: { body: 'from server' },
     });
-    const server = startSendingServer(msg);
+    const server = startSendingServer(msg, true);
     const ws = webSocket<{ body: string }>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
@@ -196,7 +259,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
       header: { traceparent: '00-12345678901234567890123456789012-0123456789012345-01' },
       data: { body: 'from server' },
     });
-    const server = startSendingServer(msg);
+    const server = startSendingServer(msg, true);
     const ws = webSocket<{ body: string }>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
@@ -222,7 +285,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
   });
 
   it('propagates trace context in a round-trip (object payload)', async () => {
-    const server = startEchoServer();
+    const server = startEchoServer(true);
     const ws = webSocket<{ body: string }>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
@@ -251,7 +314,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
   });
 
   it('wraps string payload in envelope with trace context on next()', async () => {
-    const server = startCaptureServer();
+    const server = startCaptureServer(true);
     const ws = webSocket<string>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
@@ -274,7 +337,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
   });
 
   it('string payload round-trips correctly through envelope', async () => {
-    const server = startEchoServer();
+    const server = startEchoServer(true);
     const ws = webSocket<string>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
@@ -292,7 +355,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
   });
 
   it('array payload round-trips correctly through envelope', async () => {
-    const server = startEchoServer();
+    const server = startEchoServer(true);
     const ws = webSocket<number[]>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
@@ -326,8 +389,24 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     await server.close();
   });
 
+  it('falls back to native deserializer when protocol is not negotiated', async () => {
+    const server = startSendingServer(JSON.stringify({ plain: 'recv' }), false);
+    const ws = webSocket<{ plain: string }>({
+      url: `ws://127.0.0.1:${server.port}`,
+      WebSocketCtor: WS_CTOR,
+    });
+
+    const received = await firstValueFrom(ws.pipe(timeout(TEST_TIMEOUT)));
+    expect(received).toEqual({ plain: 'recv' });
+    const spans = exporter.getFinishedSpans();
+    expect(spans.some((s) => s.name === 'websocket.receive')).toBeTruthy();
+
+    ws.complete();
+    await server.close();
+  });
+
   it('matches rxjs factory: webSocket({ url, WebSocketCtor })', async () => {
-    const server = startCaptureServer();
+    const server = startCaptureServer(true);
     const ws = webSocket({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
@@ -349,7 +428,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
       header: { traceparent: '00-12345678901234567890123456789012-0123456789012345-01' },
       data: { body: 'boom' },
     });
-    const server = startSendingServer(msg);
+    const server = startSendingServer(msg, true);
     const ws = webSocket<string>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
@@ -373,7 +452,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
   });
 
   it('all original fields preserved inside envelope data', async () => {
-    const server = startCaptureServer();
+    const server = startCaptureServer(true);
     const ws = webSocket<{ msg: string; version: string; support: string[] }>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
@@ -405,7 +484,11 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
       data: { body: 'second' },
     });
 
-    const wss = new (await import('ws')).WebSocketServer({ port: 0 });
+    const wss = new (await import('ws')).WebSocketServer({
+      port: 0,
+      handleProtocols: (protocols: Set<string>) =>
+        protocols.has(OTEL_WS_PROTOCOL) ? OTEL_WS_PROTOCOL : false,
+    });
     wss.on('connection', (client) => {
       setTimeout(() => client.send(msg1), 20);
       setTimeout(() => client.send(msg2), 40);
@@ -436,7 +519,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
   });
 
   it('user serializer output is wrapped in envelope', async () => {
-    const server = startCaptureServer();
+    const server = startCaptureServer(true);
     const ws = webSocket<{ val: number }>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
@@ -461,7 +544,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
       header: { traceparent: '00-12345678901234567890123456789012-0123456789012345-01' },
       data: { transformed: true },
     });
-    const server = startSendingServer(msg);
+    const server = startSendingServer(msg, true);
 
     let deserializerInput: string | undefined;
     const ws = webSocket<{ transformed: boolean }>({

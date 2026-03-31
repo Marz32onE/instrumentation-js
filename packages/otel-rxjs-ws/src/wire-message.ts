@@ -18,7 +18,7 @@ export interface ParsedWireMessage<T = unknown> {
 
 /**
  * Wrap `data` in a `{header, data}` envelope and inject trace headers.
- * Works for any payload type — objects, strings, arrays, numbers.
+ * Works for any payload type - objects, strings, arrays, numbers.
  */
 export function buildEnvelope(data: unknown, headers: Record<string, string>): WireEnvelope {
   const header: WireEnvelope['header'] = {};
@@ -36,7 +36,7 @@ export function buildEnvelope(data: unknown, headers: Record<string, string>): W
  * are extracted from `header` and `data` is returned as the payload.
  *
  * Non-envelope messages (legacy flat format, non-instrumented clients, plain text)
- * are returned as `data` with no trace fields extracted — no exception is thrown.
+ * are returned as `data` with no trace fields extracted - no exception is thrown.
  */
 export function deserializeMessage<T = unknown>(raw: string): ParsedWireMessage<T> {
   try {
@@ -48,10 +48,10 @@ export function deserializeMessage<T = unknown>(raw: string): ParsedWireMessage<
         tracestate: asString(parsed.header.tracestate),
       };
     }
-    diag.debug('[otel-ws-message] received non-envelope message, delivering data without trace context extraction');
+    diag.debug('[otel-rxjs-ws] received non-envelope message, delivering data without trace context extraction');
     return { data: parsed as T };
   } catch (err) {
-    diag.debug('[otel-ws-message] deserializeMessage: JSON.parse failed, treating as raw string', { error: String(err) });
+    diag.debug('[otel-rxjs-ws] deserializeMessage: JSON.parse failed, treating as raw string', { error: String(err) });
     return { data: raw as unknown as T };
   }
 }

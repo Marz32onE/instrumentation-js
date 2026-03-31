@@ -1,3 +1,4 @@
+import type { IncomingMessage } from 'http';
 import {
   Context,
   Span,
@@ -18,7 +19,7 @@ import {
   TRACESTATE_HEADER,
   buildEnvelope,
   deserializeMessage,
-} from '@marz32one/otel-ws-message';
+} from './wire-message.js';
 import { getTracerProvider } from './options.js';
 import { version } from './version.js';
 
@@ -30,36 +31,109 @@ type WsWithInternals = BaseWebSocket & {
   };
 };
 
-const PATCHED_SYMBOL = Symbol.for('@marz32one/otel-ws/patched');
+const OTEL_WS_PROTOCOL = 'otel-ws';
+
 const ORIGINAL_ON_SYMBOL = Symbol.for('@marz32one/otel-ws/original-on');
 const ORIGINAL_OFF_SYMBOL = Symbol.for('@marz32one/otel-ws/original-off');
 const ORIGINAL_SEND_SYMBOL = Symbol.for('@marz32one/otel-ws/original-send');
 const WRAPPED_HANDLERS_SYMBOL = Symbol.for('@marz32one/otel-ws/wrapped-handlers');
 const ORIGINAL_SEND_FRAME_SYMBOL = Symbol.for('@marz32one/otel-ws/original-send-frame');
+const OTEL_ACTIVE_SYMBOL = Symbol.for('@marz32one/otel-ws/otel-active');
 
 // Prevents patchNativeSendFrame from double-wrapping a message that was already
 // instrumented by patchNativeSend (since send() internally calls _sender.sendFrame()).
 const SKIP_FRAME_INJECT_KEY = createContextKey('@marz32one/otel-ws/skip-frame-inject');
 
-export default class OtelWebSocket extends BaseWebSocket {
-  constructor(address: string, protocols?: string | string[], options?: BaseWebSocket.ClientOptions) {
-    super(address, protocols, options);
-    instrumentSocket(this);
-  }
+/** Prepend otel-ws and json to the protocols list, filtering duplicates. */
+function prependOtelProtocols(protocols?: string | string[]): string[] {
+  const base = protocols == null ? [] : Array.isArray(protocols) ? [...protocols] : [protocols];
+  return [OTEL_WS_PROTOCOL, 'json', ...base.filter((p) => p !== OTEL_WS_PROTOCOL && p !== 'json')];
 }
 
-export class OtelWebSocketServer extends BaseWebSocket.Server {
-  constructor(options?: BaseWebSocket.ServerOptions, callback?: () => void) {
-    super(options, callback);
-    this.on('connection', (ws: BaseWebSocket) => instrumentSocket(ws));
-  }
+type WsRecord = BaseWebSocket & Record<symbol, unknown>;
+
+function isOtelActive(ws: BaseWebSocket): boolean {
+  return (ws as WsRecord)[OTEL_ACTIVE_SYMBOL] === true;
 }
+
+function setOtelActive(ws: BaseWebSocket): void {
+  (ws as WsRecord)[OTEL_ACTIVE_SYMBOL] = true;
+}
+
+function startMessagingSpan(
+  tracer: ReturnType<ReturnType<typeof getTracerProvider>['getTracer']>,
+  name: 'websocket.send' | 'websocket.receive',
+  kind: SpanKind,
+  parentCtx: Context,
+): Span {
+  return tracer.startSpan(
+    name,
+    {
+      kind,
+      attributes: {
+        'messaging.system': 'websocket',
+        'messaging.operation': name === 'websocket.send' ? 'send' : 'receive',
+      },
+    },
+    parentCtx,
+  );
+}
+
+export class OtelWebSocket extends BaseWebSocket {
+constructor(address: string, protocols?: string | string[], options?: BaseWebSocket.ClientOptions) {
+  super(address, prependOtelProtocols(protocols), options);
+  instrumentSocket(this);
+}
+}
+
+class InstrumentedWebSocketServer extends BaseWebSocket.Server {
+constructor(options?: BaseWebSocket.ServerOptions, callback?: () => void) {
+  const userHandleProtocols = options?.handleProtocols;
+  super({
+    ...options,
+    handleProtocols(protocols: Set<string>, req: IncomingMessage): string | false {
+      // Use spread to handle both Set (TS type) and Array (ws@5 runtime)
+      const list = [...(protocols as Iterable<string>)];
+      if (list.includes(OTEL_WS_PROTOCOL)) return OTEL_WS_PROTOCOL;
+      if (userHandleProtocols) return userHandleProtocols(protocols, req);
+      // Accept connection without a protocol when otel-ws is not offered
+      return false;
+    },
+  }, callback);
+  this.on('connection', (ws: BaseWebSocket) => {
+    if (ws.protocol === OTEL_WS_PROTOCOL) {
+      instrumentSocket(ws);
+    }
+  });
+}
+}
+
+export namespace OtelWebSocket {
+  export const Server: typeof BaseWebSocket.Server = InstrumentedWebSocketServer;
+}
+
+export default OtelWebSocket;
 
 export function instrumentSocket(ws: BaseWebSocket): BaseWebSocket {
   const tracer = getTracerProvider().getTracer('@marz32one/otel-ws', version());
-  patchNativeApis(ws, tracer);
-  // _sender is available after connect in some ws versions.
-  ws.once('open', () => patchNativeSendFrame(ws, tracer));
+
+  if (ws.readyState === BaseWebSocket.OPEN) {
+    // Server path: connection is already established, protocol is known.
+    if (ws.protocol === OTEL_WS_PROTOCOL) setOtelActive(ws);
+    patchNativeOnMessage(ws, tracer);
+    patchNativeSend(ws, tracer);
+    patchNativeSendFrame(ws, tracer);
+  } else {
+    // Client path: patch on/off/send immediately to capture handler registrations and
+    // queued sends; isOtelActive() guards the actual instrumentation behavior.
+    patchNativeOnMessage(ws, tracer);
+    patchNativeSend(ws, tracer);
+    ws.once('open', () => {
+      if (ws.protocol === OTEL_WS_PROTOCOL) setOtelActive(ws);
+      // _sender is available only after the connection is open.
+      patchNativeSendFrame(ws, tracer);
+    });
+  }
   return ws;
 }
 
@@ -68,17 +142,7 @@ function serializeWithActiveTrace(
   tracer: ReturnType<ReturnType<typeof getTracerProvider>['getTracer']>,
 ): { serialized?: string; span?: Span; error?: Error } {
   const activeCtx = otelContext.active();
-  const span = tracer.startSpan(
-    'websocket.send',
-    {
-      kind: SpanKind.PRODUCER,
-      attributes: {
-        'messaging.system': 'websocket',
-        'messaging.operation': 'send',
-      },
-    },
-    activeCtx,
-  );
+  const span = startMessagingSpan(tracer, 'websocket.send', SpanKind.PRODUCER, activeCtx);
   const spanCtx = trace.setSpan(activeCtx, span);
 
   try {
@@ -130,33 +194,21 @@ function withExtractedReceiveContext(
     ? propagation.extract(baseCtx, carrier, defaultTextMapGetter)
     : baseCtx;
 
-  const span = tracer.startSpan(
-    'websocket.receive',
-    {
-      kind: SpanKind.CONSUMER,
-      attributes: {
-        'messaging.system': 'websocket',
-        'messaging.operation': 'receive',
-      },
-    },
-    senderCtx,
-  );
+  const span = startMessagingSpan(tracer, 'websocket.receive', SpanKind.CONSUMER, senderCtx);
   const outCtx = trace.setSpan(senderCtx, span);
   span.end();
   otelContext.with(outCtx, () => run(parsed.data, outCtx));
 }
 
-function patchNativeApis(
-  ws: BaseWebSocket,
+function withPassthroughReceiveContext(
   tracer: ReturnType<ReturnType<typeof getTracerProvider>['getTracer']>,
+  run: (outCtx: Context) => void,
 ): void {
-  const wsAny = ws as BaseWebSocket & { [PATCHED_SYMBOL]?: boolean };
-  if (wsAny[PATCHED_SYMBOL]) return;
-  wsAny[PATCHED_SYMBOL] = true;
-
-  patchNativeOnMessage(ws, tracer);
-  patchNativeSend(ws, tracer);
-  patchNativeSendFrame(ws, tracer);
+  const baseCtx = otelContext.active();
+  const span = startMessagingSpan(tracer, 'websocket.receive', SpanKind.CONSUMER, baseCtx);
+  const outCtx = trace.setSpan(baseCtx, span);
+  span.end();
+  otelContext.with(outCtx, () => run(outCtx));
 }
 
 function patchNativeOnMessage(
@@ -190,8 +242,15 @@ function patchNativeOnMessage(
     let wrapped = wrappedHandlers.get(listener);
     if (!wrapped) {
       wrapped = ((raw: BaseWebSocket.Data, isBinary?: boolean) => {
-        withExtractedReceiveContext(raw, tracer, (data) => {
-          (listener as (data: unknown, isBinary?: boolean) => void)(data, isBinary);
+        if (isOtelActive(ws)) {
+          withExtractedReceiveContext(raw, tracer, (data) => {
+            (listener as (data: unknown, isBinary?: boolean) => void)(data, isBinary);
+          });
+          return;
+        }
+
+        withPassthroughReceiveContext(tracer, () => {
+          (listener as (data: BaseWebSocket.Data, isBinary?: boolean) => void)(raw, isBinary);
         });
       }) as WsListener;
       wrappedHandlers.set(listener, wrapped);
@@ -221,14 +280,28 @@ function patchNativeSend(
   const originalSend = wsAny[ORIGINAL_SEND_SYMBOL]!;
 
   ws.send = ((data: unknown, optionsOrCb?: unknown, cbMaybe?: unknown) => {
+    const cb = (typeof optionsOrCb === 'function' ? optionsOrCb : cbMaybe) as ((err?: Error) => void) | undefined;
+    if (!isOtelActive(ws)) {
+      const activeCtx = otelContext.active();
+      const span = startMessagingSpan(tracer, 'websocket.send', SpanKind.PRODUCER, activeCtx);
+      if (typeof optionsOrCb === 'function' || optionsOrCb === undefined) {
+        originalSend(data as never, (sendErr?: Error) => finishSendSpan(span, sendErr, cb));
+      } else {
+        originalSend(
+          data as never,
+          optionsOrCb as never,
+          (sendErr?: Error) => finishSendSpan(span, sendErr, cb),
+        );
+      }
+      return;
+    }
+
     const payload = serializeWithActiveTrace(data, tracer);
     if (!payload.serialized || !payload.span) {
-      const cb = (typeof optionsOrCb === 'function' ? optionsOrCb : cbMaybe) as ((err?: Error) => void) | undefined;
       cb?.(payload.error);
       return;
     }
 
-    const cb = (typeof optionsOrCb === 'function' ? optionsOrCb : cbMaybe) as ((err?: Error) => void) | undefined;
     // Set SKIP_FRAME_INJECT_KEY so the sendFrame patch knows this message was already
     // instrumented and should not be double-wrapped.
     const skipCtx = otelContext.active().setValue(SKIP_FRAME_INJECT_KEY, true);
@@ -270,17 +343,13 @@ function patchNativeSendFrame(
     }
 
     const activeCtx = otelContext.active();
-    const span = tracer.startSpan(
-      'websocket.send',
-      {
-        kind: SpanKind.PRODUCER,
-        attributes: {
-          'messaging.system': 'websocket',
-          'messaging.operation': 'send',
-        },
-      },
-      activeCtx,
-    );
+    const span = startMessagingSpan(tracer, 'websocket.send', SpanKind.PRODUCER, activeCtx);
+    if (!isOtelActive(ws)) {
+      return originalSendFrame(list, (sendErr?: Error) => {
+        finishSendSpan(span, sendErr, cb);
+      });
+    }
+
     const spanCtx = trace.setSpan(activeCtx, span);
     const patched = injectTraceIntoFrames(list, spanCtx);
 

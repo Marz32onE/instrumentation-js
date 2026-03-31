@@ -2,17 +2,19 @@
 
 Native [`ws`](https://www.npmjs.com/package/ws) OpenTelemetry instrumentation for Node.js.
 
-Propagates W3C Trace Context (`traceparent` / `tracestate`) in the JSON message body using a **flat wire format** compatible with `@marz32one/otel-rxjs-ws` and the Go worker WebSocket broadcasts.
+Propagates W3C Trace Context (`traceparent` / `tracestate`) in the JSON message body when the `otel-ws` subprotocol is negotiated.
 
-## Wire format
+## Subprotocol negotiation and wire format
 
-Trace headers are merged into the outgoing JSON object (flat — no wrapper key):
+Client side offers `otel-ws` automatically. Envelope instrumentation is enabled **only** when the server confirms `otel-ws` in the handshake (`ws.protocol === 'otel-ws'`).
+
+When negotiated, outgoing messages use an envelope:
 
 ```json
-{ "your": "payload", "traceparent": "00-…", "tracestate": "…" }
+{ "header": { "traceparent": "00-…", "tracestate": "…" }, "data": { "your": "payload" } }
 ```
 
-On receive, `traceparent` and `tracestate` are extracted from the top-level fields; the remainder is returned as the message payload. Plain text / non-JSON messages are passed through unchanged.
+When not negotiated, payloads are **fully passthrough** (native `ws` behavior): no envelope injection/extraction and no payload shape changes. `websocket.send` / `websocket.receive` spans are still created.
 
 ## Install
 
@@ -37,9 +39,23 @@ ws.on('message', (msg) => {
 });
 ```
 
-### Server-side socket instrumentation
+### Server-side (ws-compatible API)
 
-For `ws.Server`, you can instrument accepted sockets directly:
+Use `OtelWebSocket.Server` (same shape as `ws`):
+
+```typescript
+import OtelWebSocket from '@marz32one/otel-ws';
+
+const wss = new OtelWebSocket.Server({ port: 8085 });
+wss.on('connection', (ws) => {
+  // auto-instrumented on connection
+  ws.on('message', (msg) => {
+    ws.send({ ack: true });
+  });
+});
+```
+
+You can still instrument an existing `ws.Server` socket manually:
 
 ```typescript
 import WsPkg from 'ws';

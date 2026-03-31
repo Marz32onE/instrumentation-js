@@ -25,7 +25,7 @@ function getArg(name) {
   return argv[i + 1];
 }
 
-const wsUrl = getArg('--wsUrl') ?? 'ws://localhost:8085/ws';
+const wsUrl = getArg('--wsUrl') ?? 'ws://localhost:8085/otel-ws';
 const tempoUrl = getArg('--tempoUrl') ?? 'http://localhost:3200';
 const waitFlush = Number(getArg('--waitFlush') ?? '10');
 
@@ -94,6 +94,9 @@ const ack = await new Promise((resolve, reject) => {
 const traceId = ack?.traceId;
 if (!traceId) {
   console.error('Expected ack.traceId, got:', ack);
+  console.error(
+    "Hint: verify wsUrl points to /otel-ws and Sec-WebSocket-Protocol negotiation succeeded with 'otel-ws'.",
+  );
   process.exit(1);
 }
 
