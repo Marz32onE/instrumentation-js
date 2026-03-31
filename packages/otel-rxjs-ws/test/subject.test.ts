@@ -112,7 +112,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     teardown();
   });
 
-  it('sends flat format with traceparent injected into object on next()', async () => {
+  it('sends envelope format with traceparent in header on next()', async () => {
     const server = startCaptureServer();
     const ws = webSocket<{ body: string }>({
       url: `ws://127.0.0.1:${server.port}`,
@@ -130,13 +130,15 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     });
 
     const raw = await server.firstMessage;
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
 
-    expect(parsed.traceparent).toBeDefined();
-    expect(parsed.traceparent).toContain(span.spanContext().traceId);
-    expect(parsed.body).toBe('hello');
-    expect(parsed.headers).toBeUndefined();
-    expect(parsed.payload).toBeUndefined();
+    // envelope format: trace headers in `header`, user data in `data`
+    expect(parsed.header).toBeDefined();
+    expect((parsed.header as Record<string, unknown>).traceparent).toBeDefined();
+    expect((parsed.header as Record<string, unknown>).traceparent as string).toContain(span.spanContext().traceId);
+    expect(parsed.data).toEqual({ body: 'hello' });
+    // trace fields must NOT appear at top level
+    expect(parsed.traceparent).toBeUndefined();
 
     span.end();
     sub.unsubscribe();
@@ -167,8 +169,8 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
 
   it('creates a CONSUMER span on receive', async () => {
     const msg = JSON.stringify({
-      traceparent: '00-12345678901234567890123456789012-0123456789012345-01',
-      body: 'from server',
+      header: { traceparent: '00-12345678901234567890123456789012-0123456789012345-01' },
+      data: { body: 'from server' },
     });
     const server = startSendingServer(msg);
     const ws = webSocket<{ body: string }>({
@@ -191,8 +193,8 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
 
   it('sets active context in subscribe next (trace id)', async () => {
     const msg = JSON.stringify({
-      traceparent: '00-12345678901234567890123456789012-0123456789012345-01',
-      body: 'from server',
+      header: { traceparent: '00-12345678901234567890123456789012-0123456789012345-01' },
+      data: { body: 'from server' },
     });
     const server = startSendingServer(msg);
     const ws = webSocket<{ body: string }>({
@@ -248,7 +250,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     await server.close();
   });
 
-  it('non-object payload sent unchanged (no trace injection)', async () => {
+  it('wraps string payload in envelope with trace context on next()', async () => {
     const server = startCaptureServer();
     const ws = webSocket<string>({
       url: `ws://127.0.0.1:${server.port}`,
@@ -258,16 +260,56 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const sub = ws.subscribe();
     ws.next('round-trip');
     const raw = await server.firstMessage;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
 
-    expect(raw).toBe('"round-trip"');
-    expect(raw).not.toContain('traceparent');
+    // string payloads are now wrapped in envelope
+    expect(parsed.header).toBeDefined();
+    expect((parsed.header as Record<string, unknown>).traceparent).toBeDefined();
+    expect(parsed.data).toBe('round-trip');
+    expect(parsed.traceparent).toBeUndefined();
 
     sub.unsubscribe();
     ws.complete();
     await server.close();
   });
 
-  it('handles messages without trace context', async () => {
+  it('string payload round-trips correctly through envelope', async () => {
+    const server = startEchoServer();
+    const ws = webSocket<string>({
+      url: `ws://127.0.0.1:${server.port}`,
+      WebSocketCtor: WS_CTOR,
+    });
+
+    const msgPromise = firstValueFrom(ws.pipe(timeout(TEST_TIMEOUT)));
+    ws.subscribe();
+    ws.next('hello string');
+
+    const received = await msgPromise;
+    expect(received).toBe('hello string');
+
+    ws.complete();
+    await server.close();
+  });
+
+  it('array payload round-trips correctly through envelope', async () => {
+    const server = startEchoServer();
+    const ws = webSocket<number[]>({
+      url: `ws://127.0.0.1:${server.port}`,
+      WebSocketCtor: WS_CTOR,
+    });
+
+    const msgPromise = firstValueFrom(ws.pipe(timeout(TEST_TIMEOUT)));
+    ws.subscribe();
+    ws.next([1, 2, 3]);
+
+    const received = await msgPromise;
+    expect(received).toEqual([1, 2, 3]);
+
+    ws.complete();
+    await server.close();
+  });
+
+  it('handles messages without trace context (non-envelope)', async () => {
     const msg = JSON.stringify({ value: 42 });
     const server = startSendingServer(msg);
     const ws = webSocket<{ value: number }>({
@@ -277,6 +319,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
 
     const received = await firstValueFrom(ws.pipe(timeout(TEST_TIMEOUT)));
 
+    // Non-envelope message delivered as-is
     expect(received).toEqual({ value: 42 });
 
     ws.complete();
@@ -292,9 +335,10 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const sub = ws.subscribe();
     ws.next({ x: 1 });
     const raw = await server.firstMessage;
-    const parsed = JSON.parse(raw);
-    expect(parsed.traceparent).toBeDefined();
-    expect(parsed.x).toBe(1);
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    expect((parsed.header as Record<string, unknown>).traceparent).toBeDefined();
+    expect(parsed.data).toEqual({ x: 1 });
+    expect(parsed.traceparent).toBeUndefined();
     sub.unsubscribe();
     ws.complete();
     await server.close();
@@ -302,8 +346,8 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
 
   it('records ERROR status when custom deserializer throws', async () => {
     const msg = JSON.stringify({
-      traceparent: '00-12345678901234567890123456789012-0123456789012345-01',
-      body: 'boom',
+      header: { traceparent: '00-12345678901234567890123456789012-0123456789012345-01' },
+      data: { body: 'boom' },
     });
     const server = startSendingServer(msg);
     const ws = webSocket<string>({
@@ -328,7 +372,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     await server.close();
   });
 
-  it('keeps all original fields alongside traceparent (flat format)', async () => {
+  it('all original fields preserved inside envelope data', async () => {
     const server = startCaptureServer();
     const ws = webSocket<{ msg: string; version: string; support: string[] }>({
       url: `ws://127.0.0.1:${server.port}`,
@@ -338,14 +382,13 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
 
     ws.next({ msg: 'connect', version: '1', support: ['1'] });
     const raw = await server.firstMessage;
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
 
-    expect(parsed.traceparent).toBeDefined();
-    expect(parsed.msg).toBe('connect');
-    expect(parsed.version).toBe('1');
-    expect(parsed.support).toEqual(['1']);
-    expect(parsed.headers).toBeUndefined();
-    expect(parsed.payload).toBeUndefined();
+    expect((parsed.header as Record<string, unknown>).traceparent).toBeDefined();
+    expect(parsed.data).toEqual({ msg: 'connect', version: '1', support: ['1'] });
+    // no top-level leakage
+    expect(parsed.traceparent).toBeUndefined();
+    expect(parsed.msg).toBeUndefined();
 
     sub.unsubscribe();
     ws.complete();
@@ -354,12 +397,12 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
 
   it('provides correct receive context for two consecutive messages', async () => {
     const msg1 = JSON.stringify({
-      traceparent: '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0000000000000001-01',
-      body: 'first',
+      header: { traceparent: '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-0000000000000001-01' },
+      data: { body: 'first' },
     });
     const msg2 = JSON.stringify({
-      traceparent: '00-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-0000000000000002-01',
-      body: 'second',
+      header: { traceparent: '00-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-0000000000000002-01' },
+      data: { body: 'second' },
     });
 
     const wss = new (await import('ws')).WebSocketServer({ port: 0 });
@@ -390,5 +433,52 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
 
     ws.complete();
     await new Promise<void>((r) => wss.close(() => r()));
+  });
+
+  it('user serializer output is wrapped in envelope', async () => {
+    const server = startCaptureServer();
+    const ws = webSocket<{ val: number }>({
+      url: `ws://127.0.0.1:${server.port}`,
+      WebSocketCtor: WS_CTOR,
+      serializer: (v) => JSON.stringify(v),
+    });
+    const sub = ws.subscribe();
+    ws.next({ val: 99 });
+    const raw = await server.firstMessage;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+
+    expect(parsed.header).toBeDefined();
+    expect((parsed.header as Record<string, unknown>).traceparent).toBeDefined();
+    expect(parsed.data).toEqual({ val: 99 });
+
+    sub.unsubscribe();
+    ws.complete();
+    await server.close();
+  });
+
+  it('user deserializer receives envelope data field', async () => {
+    const msg = JSON.stringify({
+      header: { traceparent: '00-12345678901234567890123456789012-0123456789012345-01' },
+      data: { transformed: true },
+    });
+    const server = startSendingServer(msg);
+
+    let deserializerInput: string | undefined;
+    const ws = webSocket<{ transformed: boolean }>({
+      url: `ws://127.0.0.1:${server.port}`,
+      WebSocketCtor: WS_CTOR,
+      deserializer: (e: MessageEvent) => {
+        deserializerInput = e.data as string;
+        return JSON.parse(e.data as string) as { transformed: boolean };
+      },
+    });
+
+    const received = await firstValueFrom(ws.pipe(timeout(TEST_TIMEOUT)));
+    expect(received).toEqual({ transformed: true });
+    // The deserializer should receive the inner data field as JSON string
+    expect(deserializerInput).toBe(JSON.stringify({ transformed: true }));
+
+    ws.complete();
+    await server.close();
   });
 });

@@ -4,9 +4,10 @@
 install:
 	npm install
 
-# Build all packages
+# Build all packages (otel-ws-message must build first as it is a shared dep)
 build:
-	npm run build --workspaces
+	npm run build -w packages/otel-ws-message
+	npm run build -w packages/otel-ws -w packages/otel-rxjs-ws
 
 # Run all tests
 test:

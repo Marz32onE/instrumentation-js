@@ -4,6 +4,7 @@ import {
   SpanKind,
   SpanStatusCode,
   context as otelContext,
+  createContextKey,
   defaultTextMapGetter,
   defaultTextMapSetter,
   diag,
@@ -15,9 +16,9 @@ import BaseWebSocket from 'ws';
 import {
   TRACEPARENT_HEADER,
   TRACESTATE_HEADER,
+  buildEnvelope,
   deserializeMessage,
-  injectTrace,
-} from './message.js';
+} from '@marz32one/otel-ws-message';
 import { getTracerProvider } from './options.js';
 import { version } from './version.js';
 
@@ -35,6 +36,11 @@ const ORIGINAL_OFF_SYMBOL = Symbol.for('@marz32one/otel-ws/original-off');
 const ORIGINAL_SEND_SYMBOL = Symbol.for('@marz32one/otel-ws/original-send');
 const WRAPPED_HANDLERS_SYMBOL = Symbol.for('@marz32one/otel-ws/wrapped-handlers');
 const ORIGINAL_SEND_FRAME_SYMBOL = Symbol.for('@marz32one/otel-ws/original-send-frame');
+
+// Prevents patchNativeSendFrame from double-wrapping a message that was already
+// instrumented by patchNativeSend (since send() internally calls _sender.sendFrame()).
+const SKIP_FRAME_INJECT_KEY = createContextKey('@marz32one/otel-ws/skip-frame-inject');
+
 export default class OtelWebSocket extends BaseWebSocket {
   constructor(address: string, protocols?: string | string[], options?: BaseWebSocket.ClientOptions) {
     super(address, protocols, options);
@@ -71,7 +77,7 @@ function serializeWithActiveTrace(
   try {
     const carrier: Record<string, string> = {};
     propagation.inject(spanCtx, carrier, defaultTextMapSetter);
-    return { serialized: JSON.stringify(injectTrace(data, carrier)), span };
+    return { serialized: JSON.stringify(buildEnvelope(data, carrier)), span };
   } catch (err) {
     const error = err as Error;
     diag.error('[otel-ws] websocket.send: serialization failed', { error: error.message });
@@ -216,14 +222,20 @@ function patchNativeSend(
     }
 
     const cb = (typeof optionsOrCb === 'function' ? optionsOrCb : cbMaybe) as ((err?: Error) => void) | undefined;
-    if (typeof optionsOrCb === 'function' || optionsOrCb === undefined) {
-      return originalSend(payload.serialized, (sendErr?: Error) => finishSendSpan(payload.span!, sendErr, cb));
-    }
-    return originalSend(
-      payload.serialized,
-      optionsOrCb as never,
-      (sendErr?: Error) => finishSendSpan(payload.span!, sendErr, cb),
-    );
+    // Set SKIP_FRAME_INJECT_KEY so the sendFrame patch knows this message was already
+    // instrumented and should not be double-wrapped.
+    const skipCtx = otelContext.active().setValue(SKIP_FRAME_INJECT_KEY, true);
+    otelContext.with(skipCtx, () => {
+      if (typeof optionsOrCb === 'function' || optionsOrCb === undefined) {
+        originalSend(payload.serialized!, (sendErr?: Error) => finishSendSpan(payload.span!, sendErr, cb));
+      } else {
+        originalSend(
+          payload.serialized!,
+          optionsOrCb as never,
+          (sendErr?: Error) => finishSendSpan(payload.span!, sendErr, cb),
+        );
+      }
+    });
   }) as BaseWebSocket['send'];
 }
 
@@ -245,6 +257,11 @@ function patchNativeSendFrame(
   const originalSendFrame = withInternals[ORIGINAL_SEND_FRAME_SYMBOL]!;
 
   sender.sendFrame = (list: ReadonlyArray<Buffer>, cb?: (err?: Error) => void) => {
+    // Skip if this frame was already instrumented by patchNativeSend.
+    if (otelContext.active().getValue(SKIP_FRAME_INJECT_KEY)) {
+      return originalSendFrame(list, cb);
+    }
+
     const activeCtx = otelContext.active();
     const span = tracer.startSpan(
       'websocket.send',
@@ -312,9 +329,8 @@ function injectTraceIntoSingleFrame(frame: Buffer, carrier: Record<string, strin
     return frame;
   }
 
-  const injected = injectTrace(parsed, carrier);
-  const injectedText = JSON.stringify(injected);
-  const injectedPayload = Buffer.from(injectedText, 'utf8');
+  const envelope = buildEnvelope(parsed, carrier);
+  const injectedPayload = Buffer.from(JSON.stringify(envelope), 'utf8');
   return buildFrame(byte0, masked, maskKey, injectedPayload);
 }
 

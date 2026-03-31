@@ -50,7 +50,7 @@ describe('otel-ws', () => {
 
   afterEach(() => teardown());
 
-  it('injects traceparent on send (client)', async () => {
+  it('wraps payload in envelope with traceparent on send (client)', async () => {
     let resolveFirst: ((msg: string) => void) | null = null;
     const firstMessage = new Promise<string>((resolve) => (resolveFirst = resolve));
     const wss = new WsPkg.Server({ port: 0 });
@@ -75,12 +75,13 @@ describe('otel-ws', () => {
     const raw = await firstMessage;
     const parsed = JSON.parse(raw) as Record<string, unknown>;
 
-    // flat format: traceparent injected alongside original fields
-    expect(parsed.traceparent).toBeDefined();
-    expect(parsed.traceparent as string).toContain(span.spanContext().traceId);
-    expect(parsed.hello).toBe('world');
-    expect(parsed.data).toBeUndefined();
-    expect(parsed.payload).toBeUndefined();
+    // envelope format: trace headers in `header`, user data in `data`
+    expect(parsed.header).toBeDefined();
+    expect((parsed.header as Record<string, unknown>).traceparent).toBeDefined();
+    expect((parsed.header as Record<string, unknown>).traceparent as string).toContain(span.spanContext().traceId);
+    expect(parsed.data).toEqual({ hello: 'world' });
+    // trace fields must NOT appear at top level
+    expect(parsed.traceparent).toBeUndefined();
 
     span.end();
     client.close();
@@ -93,25 +94,28 @@ describe('otel-ws', () => {
       setTimeout(() => {
         ws.send(
           JSON.stringify({
-            traceparent: '00-12345678901234567890123456789012-0123456789012345-01',
-            body: 'from server',
+            header: { traceparent: '00-12345678901234567890123456789012-0123456789012345-01' },
+            data: { body: 'from server' },
           }),
         );
       }, 20);
     });
     const port = (wss.address() as AddressInfo).port;
-    const traceId = await new Promise<string | undefined>((resolve) => {
+    const received = await new Promise<{ traceId: string | undefined; data: unknown }>((resolve) => {
       const client = new WebSocket(`ws://127.0.0.1:${port}`);
-      client.on('message', () => {
-        resolve(trace.getSpanContext(context.active())?.traceId);
+      client.on('message', (data) => {
+        resolve({
+          traceId: trace.getSpanContext(context.active())?.traceId,
+          data,
+        });
       });
     });
 
-    expect(traceId).toBe('12345678901234567890123456789012');
+    expect(received.traceId).toBe('12345678901234567890123456789012');
+    expect(received.data).toEqual({ body: 'from server' });
     const spans = exporter.getFinishedSpans();
     expect(spans.some((s) => s.name === 'websocket.receive')).toBeTruthy();
 
-    // client closed by test process
     await new Promise<void>((r) => wss.close(() => r()));
   });
 
@@ -121,8 +125,8 @@ describe('otel-ws', () => {
       setTimeout(() => {
         ws.send(
           JSON.stringify({
-            traceparent: '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01',
-            body: 'native-handler',
+            header: { traceparent: '00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01' },
+            data: { body: 'native-handler' },
           }),
         );
       }, 20);
@@ -191,11 +195,10 @@ describe('otel-ws', () => {
 
     expect(received).toBe('plain text');
 
-    // no-op
     await new Promise<void>((r) => wss.close(() => r()));
   });
 
-  it('injects trace in Buffer.concat(Sender.frame(...)) via _sender.sendFrame patch', async () => {
+  it('wraps non-object payload (string) in envelope via _sender.sendFrame patch', async () => {
     let resolveFirst: ((msg: string) => void) | null = null;
     const firstMessage = new Promise<string>((resolve) => (resolveFirst = resolve));
     const wss = new WsPkg.Server({ port: 0 });
@@ -240,8 +243,9 @@ describe('otel-ws', () => {
     parent.end();
     const wire = await firstMessage;
     const parsed = JSON.parse(wire) as Record<string, unknown>;
-    expect(parsed.traceparent).toBeDefined();
-    expect(parsed.hello).toBe('frame');
+    expect((parsed.header as Record<string, unknown>).traceparent).toBeDefined();
+    expect(parsed.data).toEqual({ hello: 'frame' });
+    expect(parsed.traceparent).toBeUndefined();
 
     const spans = exporter.getFinishedSpans();
     expect(spans.some((s) => s.name === 'websocket.send')).toBeTruthy();
@@ -296,16 +300,18 @@ describe('otel-ws', () => {
         if (received.length === 2) resolve(received);
       });
       client.send(
+        // Send in envelope format so the server's instrumented receive can extract trace context
         JSON.stringify({
-          text: 'from client',
-          traceparent: '00-cccccccccccccccccccccccccccccccc-dddddddddddddddd-01',
+          header: { traceparent: '00-cccccccccccccccccccccccccccccccc-dddddddddddddddd-01' },
+          data: { text: 'from client' },
         }),
         (err) => err && reject(err),
       );
     });
 
     const parsed = wireMessages.map((w) => JSON.parse(w) as Record<string, unknown>);
-    expect(parsed.every((m) => typeof m.traceparent === 'string')).toBeTruthy();
+    // Both responses should be envelopes with traceparent in header
+    expect(parsed.every((m) => typeof (m.header as Record<string, unknown>)?.traceparent === 'string')).toBeTruthy();
     expect(receiveTraceIds[0]).toBe('cccccccccccccccccccccccccccccccc');
 
     const spans = exporter.getFinishedSpans();
@@ -313,6 +319,39 @@ describe('otel-ws', () => {
     expect(spans.filter((s) => s.name === 'websocket.send').length).toBeGreaterThanOrEqual(2);
 
     client.close();
+    await new Promise<void>((r) => wss.close(() => r()));
+  });
+
+  it('delivers non-envelope message as-is without crashing (legacy / non-instrumented client)', async () => {
+    const wss = new WsPkg.Server({ port: 0 });
+    wss.on('connection', (ws) => {
+      setTimeout(() => {
+        // Legacy flat format — not an envelope
+        ws.send(JSON.stringify({ body: 'legacy', traceparent: '00-12345678901234567890123456789012-0123456789012345-01' }));
+      }, 20);
+    });
+    const port = (wss.address() as AddressInfo).port;
+
+    const received = await new Promise<{ data: unknown; traceId: string | undefined }>((resolve) => {
+      const client = new WebSocket(`ws://127.0.0.1:${port}`);
+      client.on('message', (data) => {
+        resolve({
+          data,
+          traceId: trace.getSpanContext(context.active())?.traceId,
+        });
+      });
+    });
+
+    // Data delivered as-is (the raw parsed object)
+    expect((received.data as Record<string, unknown>).body).toBe('legacy');
+    // The receive span creates its own root trace — the legacy traceparent is NOT extracted
+    expect(received.traceId).not.toBe('12345678901234567890123456789012');
+    // A receive span is still created (with no extracted parent — it is a root span)
+    const spans = exporter.getFinishedSpans();
+    const recvSpan = spans.find((s) => s.name === 'websocket.receive');
+    expect(recvSpan).toBeDefined();
+    expect(recvSpan!.parentSpanId).toBeUndefined();
+
     await new Promise<void>((r) => wss.close(() => r()));
   });
 });

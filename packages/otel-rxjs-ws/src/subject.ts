@@ -15,9 +15,9 @@ import { WebSocketSubject, WebSocketSubjectConfig } from 'rxjs/webSocket';
 import {
   TRACEPARENT_HEADER,
   TRACESTATE_HEADER,
+  buildEnvelope,
   deserializeMessage,
-  injectTrace,
-} from './message.js';
+} from '@marz32one/otel-ws-message';
 import { getTracerProvider } from './options.js';
 import { version } from './version.js';
 
@@ -148,14 +148,8 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
       const carrier: Record<string, string> = {};
       propagation.inject(spanCtx, carrier, defaultTextMapSetter);
 
-      const wireHeaders: Record<string, string> = {};
-      const tp = carrier[TRACEPARENT_HEADER];
-      const ts = carrier[TRACESTATE_HEADER];
-      if (tp) wireHeaders[TRACEPARENT_HEADER] = tp;
-      if (ts) wireHeaders[TRACESTATE_HEADER] = ts;
-
       span.setStatus({ code: SpanStatusCode.OK });
-      return JSON.stringify(injectTrace(data, wireHeaders));
+      return JSON.stringify(buildEnvelope(data, carrier));
     } catch (err) {
       diag.error('[otel-rxjs-ws] _serializeOutgoing: serialization failed', { error: (err as Error).message });
       span.recordException(err as Error);
