@@ -322,6 +322,60 @@ describe('otel-ws', () => {
     await new Promise<void>((r) => wss.close(() => r()));
   });
 
+  it('OtelWebSocketServer auto-instruments server sockets on connection', async () => {
+    const { OtelWebSocketServer } = await import('../src/index.js');
+    const wss = new OtelWebSocketServer({ port: 0 });
+    const receiveTraceId = await new Promise<string | undefined>((resolve, reject) => {
+      wss.on('connection', (ws) => {
+        // No instrumentSocket call — auto-instrumented by OtelWebSocketServer
+        ws.on('message', () => {
+          resolve(trace.getSpanContext(context.active())?.traceId);
+        });
+      });
+      const port = (wss.address() as AddressInfo).port;
+      const client = new WsPkg(`ws://127.0.0.1:${port}`);
+      client.once('open', () => {
+        client.send(
+          JSON.stringify({
+            header: { traceparent: '00-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-ffffffffffffffff-01' },
+            data: { text: 'auto-instrumented' },
+          }),
+          (err) => { if (err) reject(err); },
+        );
+      });
+      client.once('error', reject);
+    });
+
+    expect(receiveTraceId).toBe('eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee');
+    const spans = exporter.getFinishedSpans();
+    expect(spans.some((s) => s.name === 'websocket.receive')).toBeTruthy();
+
+    await new Promise<void>((r) => wss.close(() => r()));
+  });
+
+  it('OtelWebSocketServer sends with trace context injected', async () => {
+    const { OtelWebSocketServer } = await import('../src/index.js');
+    const wss = new OtelWebSocketServer({ port: 0 });
+    wss.on('connection', (ws) => {
+      // No instrumentSocket call — send is auto-patched
+      ws.send({ reply: true });
+    });
+    const port = (wss.address() as AddressInfo).port;
+
+    const wire = await new Promise<string>((resolve, reject) => {
+      const client = new WsPkg(`ws://127.0.0.1:${port}`);
+      client.on('message', (data) => resolve(data.toString()));
+      client.once('error', reject);
+    });
+
+    const parsed = JSON.parse(wire) as Record<string, unknown>;
+    expect(parsed.header).toBeDefined();
+    expect((parsed.header as Record<string, unknown>).traceparent).toBeDefined();
+    expect(parsed.data).toEqual({ reply: true });
+
+    await new Promise<void>((r) => wss.close(() => r()));
+  });
+
   it('delivers non-envelope message as-is without crashing (legacy / non-instrumented client)', async () => {
     const wss = new WsPkg.Server({ port: 0 });
     wss.on('connection', (ws) => {

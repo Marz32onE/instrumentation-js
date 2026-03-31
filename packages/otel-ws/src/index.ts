@@ -48,6 +48,13 @@ export default class OtelWebSocket extends BaseWebSocket {
   }
 }
 
+export class OtelWebSocketServer extends BaseWebSocket.Server {
+  constructor(options?: BaseWebSocket.ServerOptions, callback?: () => void) {
+    super(options, callback);
+    this.on('connection', (ws: BaseWebSocket) => instrumentSocket(ws));
+  }
+}
+
 export function instrumentSocket(ws: BaseWebSocket): BaseWebSocket {
   const tracer = getTracerProvider().getTracer('@marz32one/otel-ws', version());
   patchNativeApis(ws, tracer);
