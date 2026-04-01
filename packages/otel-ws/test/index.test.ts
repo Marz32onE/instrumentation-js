@@ -419,6 +419,92 @@ describe('otel-ws', () => {
     await new Promise<void>((r) => wss.close(() => r()));
   });
 
+  it('removes a message listener via .off() so it is no longer called', async () => {
+    const wss = createNegotiatingServer();
+    wss.on('connection', (ws) => {
+      setTimeout(() => ws.send(
+        JSON.stringify({
+          header: { traceparent: '00-abababababababababababababababab01-0000000000000001-01' },
+          data: { body: 'should-not-arrive' },
+        }),
+      ), 20);
+    });
+    const port = (wss.address() as AddressInfo).port;
+    const socket = await new Promise<WebSocket>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+      ws.once('open', () => resolve(ws));
+      ws.once('error', reject);
+    });
+
+    let called = false;
+    const handler = () => { called = true; };
+    socket.on('message', handler);
+    socket.off('message', handler);
+
+    // Give the server time to send the message
+    await new Promise<void>((r) => setTimeout(r, 60));
+
+    expect(called).toBe(false);
+
+    socket.close();
+    await new Promise<void>((r) => wss.close(() => r()));
+  });
+
+  it('delivers binary message payload as-is (passthrough)', async () => {
+    const binaryData = Buffer.from([0x01, 0x02, 0x03, 0x04]);
+    const wss = new WsPkg.Server({ port: 0 });
+    wss.on('connection', (ws) => {
+      setTimeout(() => ws.send(binaryData), 20);
+    });
+    const port = (wss.address() as AddressInfo).port;
+
+    const received = await new Promise<WsPkg.Data>((resolve) => {
+      const client = new WebSocket(`ws://127.0.0.1:${port}`);
+      client.on('message', (data) => resolve(data));
+    });
+
+    // Normalize to Buffer regardless of how ws delivers binary (Buffer, Buffer[], Uint8Array)
+    const buf = Array.isArray(received)
+      ? Buffer.concat(received as Buffer[])
+      : Buffer.from(received as Buffer | Uint8Array);
+    expect(buf).toEqual(binaryData);
+
+    await new Promise<void>((r) => wss.close(() => r()));
+  });
+
+  it('handles malformed envelope gracefully (null header, missing data)', async () => {
+    const wss = new WsPkg.Server({ port: 0 });
+    const messages = [
+      JSON.stringify({ header: null, data: { value: 1 } }),
+      JSON.stringify({ header: {}, data: null }),
+    ];
+    let idx = 0;
+    wss.on('connection', (ws) => {
+      const send = () => {
+        if (idx < messages.length) ws.send(messages[idx++]);
+      };
+      setTimeout(send, 20);
+      setTimeout(send, 40);
+    });
+    const port = (wss.address() as AddressInfo).port;
+
+    const received: unknown[] = [];
+    await new Promise<void>((resolve) => {
+      const client = new WebSocket(`ws://127.0.0.1:${port}`);
+      client.on('message', (data) => {
+        received.push(data);
+        if (received.length === 2) resolve();
+      });
+    });
+
+    // Both messages should be delivered without throwing
+    expect(received).toHaveLength(2);
+    const spans = exporter.getFinishedSpans();
+    expect(spans.filter((s) => s.name === 'websocket.receive')).toHaveLength(2);
+
+    await new Promise<void>((r) => wss.close(() => r()));
+  });
+
   it('falls back to passthrough payload when protocol is not negotiated', async () => {
     let resolveFirst: ((msg: string) => void) | null = null;
     const firstMessage = new Promise<string>((resolve) => (resolveFirst = resolve));

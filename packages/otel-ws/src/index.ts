@@ -52,6 +52,10 @@ function prependOtelProtocols(protocols?: string | string[]): string[] {
 
 type WsRecord = BaseWebSocket & Record<symbol, unknown>;
 
+// A narrow callable alias for ws.on/ws.off when passing a general listener.
+// Avoids `as never` hacks caused by TypeScript's union-overload resolution on EventEmitter.
+type WsEmitGeneric = (event: string | symbol, listener: WsListener) => BaseWebSocket;
+
 function isOtelActive(ws: BaseWebSocket): boolean {
   return (ws as WsRecord)[OTEL_ACTIVE_SYMBOL] === true;
 }
@@ -231,12 +235,12 @@ function patchNativeOnMessage(
     wsAny[WRAPPED_HANDLERS_SYMBOL] = new WeakMap<WsListener, WsListener>();
   }
 
-  const originalOn = wsAny[ORIGINAL_ON_SYMBOL]!;
-  const originalOff = wsAny[ORIGINAL_OFF_SYMBOL]!;
+  const originalOn = wsAny[ORIGINAL_ON_SYMBOL]! as WsEmitGeneric;
+  const originalOff = wsAny[ORIGINAL_OFF_SYMBOL]! as WsEmitGeneric;
   const wrappedHandlers = wsAny[WRAPPED_HANDLERS_SYMBOL]!;
   ws.on = ((event: WsMessageEvent, listener: WsListener) => {
     if (event !== 'message' || typeof listener !== 'function') {
-      return originalOn(event, listener as never);
+      return originalOn(event, listener);
     }
 
     let wrapped = wrappedHandlers.get(listener);
@@ -256,15 +260,15 @@ function patchNativeOnMessage(
       wrappedHandlers.set(listener, wrapped);
     }
 
-    return originalOn(event, wrapped as never);
+    return originalOn(event, wrapped);
   }) as BaseWebSocket['on'];
 
   ws.off = ((event: WsMessageEvent, listener: WsListener) => {
     if (event !== 'message' || typeof listener !== 'function') {
-      return originalOff(event, listener as never);
+      return originalOff(event, listener);
     }
     const wrapped = wrappedHandlers.get(listener);
-    return originalOff(event, (wrapped ?? listener) as never);
+    return originalOff(event, wrapped ?? listener);
   }) as BaseWebSocket['off'];
 }
 

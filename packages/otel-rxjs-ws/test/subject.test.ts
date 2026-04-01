@@ -539,6 +539,86 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     await server.close();
   });
 
+  it('logs warning and sets ERROR span status when serializer returns non-string', async () => {
+    const server = startCaptureServer(true);
+    const ws = webSocket<{ val: number }>({
+      url: `ws://127.0.0.1:${server.port}`,
+      WebSocketCtor: WS_CTOR,
+      // Return an ArrayBuffer — valid for ws.send() so the socket stays open,
+      // but not a string, so our code sets ERROR status on the span.
+      serializer: () => new ArrayBuffer(4) as unknown as string,
+    });
+
+    const sub = ws.subscribe();
+    ws.next({ val: 42 });
+    await server.firstMessage; // wait until the non-string value reaches the server
+
+    const spans = exporter.getFinishedSpans();
+    const sendSpan = spans.find((s) => s.name === 'websocket.send');
+    expect(sendSpan).toBeDefined();
+    expect(sendSpan!.status.code).toBe(SpanStatusCode.ERROR);
+
+    sub.unsubscribe();
+    ws.complete();
+    await server.close();
+  });
+
+  it('provides correct receive context for many rapid consecutive messages', async () => {
+    const COUNT = 10;
+    // Use trace IDs with repeated hex pairs — easy to read, valid W3C (non-zero)
+    const traceIds = Array.from({ length: COUNT }, (_, i) => {
+      const byte = (i + 1).toString(16).padStart(2, '0');
+      return byte.repeat(16);
+    });
+    const messages = traceIds.map((tid, i) => {
+      const spanId = (i + 1).toString(16).padStart(16, '0');
+      return JSON.stringify({
+        header: { traceparent: `00-${tid}-${spanId}-01` },
+        data: { index: i },
+      });
+    });
+
+    const wss = new (await import('ws')).WebSocketServer({
+      port: 0,
+      handleProtocols: (protocols: Set<string>) =>
+        protocols.has(OTEL_WS_PROTOCOL) ? OTEL_WS_PROTOCOL : false,
+    });
+    wss.on('connection', (client) => {
+      // Small delay so the client's openObserver fires and sets _otelProtocolActive
+      // before any messages are processed, then send all at once to stress the queue.
+      setTimeout(() => {
+        for (const msg of messages) client.send(msg);
+      }, 20);
+    });
+    const { port } = wss.address() as import('net').AddressInfo;
+
+    const ws = webSocket<{ index: number }>({
+      url: `ws://127.0.0.1:${port}`,
+      WebSocketCtor: WS_CTOR,
+    });
+
+    const receivedTraceIds: (string | undefined)[] = [];
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timeout')), TEST_TIMEOUT);
+      ws.subscribe({
+        next: () => {
+          receivedTraceIds.push(trace.getSpanContext(context.active())?.traceId);
+          if (receivedTraceIds.length === COUNT) {
+            clearTimeout(timer);
+            resolve();
+          }
+        },
+      });
+    });
+
+    for (let i = 0; i < COUNT; i++) {
+      expect(receivedTraceIds[i]).toBe(traceIds[i]);
+    }
+
+    ws.complete();
+    await new Promise<void>((r) => wss.close(() => r()));
+  });
+
   it('user deserializer receives envelope data field', async () => {
     const msg = JSON.stringify({
       header: { traceparent: '00-12345678901234567890123456789012-0123456789012345-01' },

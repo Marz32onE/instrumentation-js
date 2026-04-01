@@ -69,15 +69,23 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
       configIn;
 
     const userOpenObserver = configIn.openObserver;
+    const userCloseObserver = configIn.closingObserver;
     const merged: WebSocketSubjectConfig<T> = {
       ...rest,
       protocol: prependOtelProtocol(configIn.protocol),
       openObserver: {
         next: (event: Event) => {
-          const target = event.target as { protocol?: string } | null;
-          const protocol = target?.protocol ?? ((holder.inst as unknown as { _socket?: { protocol?: string } })._socket?.protocol);
+          const protocol = (event.target as { protocol?: string } | null)?.protocol;
           holder.inst!._otelProtocolActive = protocol === OTEL_WS_PROTOCOL;
           userOpenObserver?.next?.(event);
+        },
+      },
+      closingObserver: {
+        next: (value: void) => {
+          // Clear stale context queues so they don't bleed across reconnects.
+          holder.inst!._pendingSendContexts.length = 0;
+          holder.inst!._pendingReceiveCtxs.length = 0;
+          userCloseObserver?.next?.(value);
         },
       },
       serializer: (value: T) => holder.inst!._serializeOutgoing(value),
@@ -92,11 +100,11 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
     this._tracer = getTracerProvider().getTracer('@marz32one/otel-rxjs-ws', version());
   }
 
-  override next(value?: T): void {
+  override next(value: T): void {
     this._pendingSendContexts.push(otelContext.active());
     const lenBefore = this._pendingSendContexts.length;
     try {
-      super.next(value!);
+      super.next(value);
     } catch (err) {
       // Only remove the context we just pushed if the serializer didn't already shift it.
       // The serializer shifts the context, so if length is unchanged, serialization never ran.
@@ -116,6 +124,7 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
             subscriber.next(value);
           });
         } else {
+          diag.warn('[otel-rxjs-ws] receive context queue empty, delivering without extracted trace context');
           subscriber.next(value);
         }
       },
