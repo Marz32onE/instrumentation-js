@@ -6,7 +6,7 @@ Propagates W3C Trace Context (`traceparent` / `tracestate`) in the JSON message 
 
 ## Subprotocol negotiation and wire format
 
-Client side offers `otel-ws` automatically. Envelope instrumentation is enabled **only** when the server confirms `otel-ws` in the handshake (`ws.protocol === 'otel-ws'`).
+Client side automatically prepends `otel-ws` and `json` to the subprotocol list. Envelope instrumentation is enabled **only** when the server confirms `otel-ws` in the handshake (`ws.protocol === 'otel-ws'`).
 
 When negotiated, outgoing messages use an envelope:
 

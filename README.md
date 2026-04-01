@@ -15,17 +15,23 @@ OpenTelemetry instrumentation packages for JavaScript/TypeScript.
 
 Import like RxJS: `import { webSocket } from '@marz32one/otel-rxjs-ws/webSocket'`.
 
+### Subprotocol negotiation
+
+`otel-rxjs-ws` automatically prepends `otel-ws` to the subprotocol list on every connection. Envelope instrumentation is enabled **only** when the server confirms `otel-ws` in the handshake. When not negotiated, payloads pass through unchanged and spans are still created.
+
+Protocol activation is detected via the WebSocket `open` event; stale context queues are cleared on close to prevent bleed across reconnects.
+
 ### How it works
 
 | Side | What happens |
 |------|--------------|
-| **Sender** (`next`) | Injects `traceparent` / `tracestate` as top-level fields into the outgoing JSON object. |
-| **Receiver** | Extracts `traceparent` / `tracestate` from top-level fields; returns remaining fields as the message payload. |
+| **Sender** (`next`) | Wraps outgoing payload in an envelope with `header` containing `traceparent` / `tracestate`. |
+| **Receiver** | Extracts `traceparent` / `tracestate` from the `header` field; returns `data` as the message payload. |
 
-Wire format (flat — trace fields merged with payload):
+Wire format (envelope — only active when `otel-ws` subprotocol is negotiated):
 
 ```json
-{ "your": "payload", "traceparent": "00-…", "tracestate": "…" }
+{ "header": { "traceparent": "00-…", "tracestate": "…" }, "data": { "your": "payload" } }
 ```
 
 ### Installation
@@ -72,7 +78,9 @@ Identical to [`rxjs/webSocket`](https://rxjs.dev/api/webSocket): exports only `w
 
 ## @marz32one/otel-ws
 
-Native Node.js `ws` wrapper. Same wire format as `otel-rxjs-ws`.
+Native Node.js `ws` wrapper. Same envelope wire format as `otel-rxjs-ws`.
+
+Automatically prepends `otel-ws` and `json` to the subprotocol list. Envelope injection is active only when `otel-ws` is confirmed by the server.
 
 ```typescript
 import WebSocket from '@marz32one/otel-ws';
@@ -83,6 +91,17 @@ ws.on('open', () => {
 });
 ws.on('message', (msg) => {
   console.log('recv', msg);
+});
+```
+
+Use `OtelWebSocket.Server` for auto-instrumented server-side sockets:
+
+```typescript
+import OtelWebSocket from '@marz32one/otel-ws';
+
+const wss = new OtelWebSocket.Server({ port: 8085 });
+wss.on('connection', (ws) => {
+  ws.on('message', (msg) => ws.send({ ack: true }));
 });
 ```
 

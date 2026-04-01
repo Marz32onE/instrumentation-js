@@ -7,7 +7,8 @@ This package is **ESM-only** (`"type": "module"`). Run `npm run build` so `dist/
 ## Subprotocol negotiation and wire format
 
 The client offers `otel-ws` automatically via WebSocket subprotocol negotiation.
-Envelope instrumentation is enabled **only** when the server confirms `otel-ws`.
+Envelope instrumentation is enabled **only** when the server confirms `otel-ws` in the handshake.
+Protocol activation is detected via the WebSocket `open` event. On close, pending context queues are cleared to prevent stale contexts from bleeding across reconnects.
 
 ```json
 { "header": { "traceparent": "00-…", "tracestate": "…" }, "data": { "your": "payload" } }
