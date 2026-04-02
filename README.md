@@ -6,137 +6,138 @@ OpenTelemetry instrumentation packages for JavaScript/TypeScript.
 
 | Package | Description |
 |---------|-------------|
-| [`@marz32one/otel-websocket`](packages/otel-websocket) | WebSocket connections with automatic W3C Trace Context propagation |
+| [`@marz32one/otel-rxjs-ws`](packages/otel-rxjs-ws) | ESM-only; RxJS `webSocket`-style API + W3C Trace Context in the message body |
+| [`@marz32one/otel-ws`](packages/otel-ws) | Native Node.js `ws` API + W3C Trace Context in the message body |
 
 ---
 
-## @marz32one/otel-websocket
+## @marz32one/otel-rxjs-ws
 
-TypeScript port of [`instrumentation-go/otel-websocket`](https://github.com/Marz32onE/instrumentation-go/tree/main/otel-websocket).
+Import like RxJS: `import { webSocket } from '@marz32one/otel-rxjs-ws/webSocket'`.
 
-Wraps a [`ws`](https://github.com/websockets/ws) WebSocket and adds OpenTelemetry distributed-tracing support by propagating the **W3C Trace Context** inside the WebSocket message body.  The wire format is compatible with the Go version, so a TypeScript client can talk to a Go server and vice-versa.
+### Subprotocol negotiation
+
+`otel-rxjs-ws` automatically prepends `otel-ws` to the subprotocol list on every connection. Envelope instrumentation is enabled **only** when the server confirms `otel-ws` in the handshake. When not negotiated, payloads pass through unchanged and spans are still created.
+
+Protocol activation is detected via the WebSocket `open` event; stale context queues are cleared on close to prevent bleed across reconnects.
 
 ### How it works
 
 | Side | What happens |
 |------|--------------|
-| **Sender** (`writeMessage`) | The current span's trace-context headers (e.g. `traceparent`, `tracestate`) are injected into a lightweight JSON envelope that wraps the original payload. The envelope is sent as the WebSocket message body. |
-| **Receiver** (`readMessage`) | The JSON envelope is unwrapped, trace-context headers are extracted and used to reconstruct the remote span context, and a new `Context` that carries the propagated span is returned to the caller. |
+| **Sender** (`next`) | Wraps outgoing payload in an envelope with `header` containing `traceparent` / `tracestate`. |
+| **Receiver** | Extracts `traceparent` / `tracestate` from the `header` field; returns `data` as the message payload. |
 
-```
-┌─────────────────────────────────────┐
-│  WebSocket message body (JSON)       │
-│  {                                   │
-│    "headers": {                      │
-│      "traceparent": "00-abc…-01"     │
-│    },                                │
-│    "payload": "<base64-encoded>"     │
-│  }                                   │
-└─────────────────────────────────────┘
+Wire format (envelope — only active when `otel-ws` subprotocol is negotiated):
+
+```json
+{ "header": { "traceparent": "00-…", "tracestate": "…" }, "data": { "your": "payload" } }
 ```
 
 ### Installation
 
 ```bash
-npm install @marz32one/otel-websocket @opentelemetry/api
+npm install @marz32one/otel-rxjs-ws @opentelemetry/api rxjs
 ```
 
 ### Quick start
 
 ```typescript
-import { ROOT_CONTEXT, propagation, trace } from '@opentelemetry/api';
-import { CompositePropagator, W3CTraceContextPropagator } from '@opentelemetry/core';
-import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
-import { dial, newConn, TextMessage } from '@marz32one/otel-websocket';
-import { WebSocketServer } from 'ws';
+import { context, trace } from '@opentelemetry/api';
+import { webSocket } from '@marz32one/otel-rxjs-ws/webSocket';
 
-// 1. Initialise the OTel SDK at process startup.
-const provider = new NodeTracerProvider();
-provider.register({
-  propagator: new CompositePropagator({
-    propagators: [new W3CTraceContextPropagator()],
-  }),
+const ws = webSocket<{ text: string }>({ url: 'ws://localhost:8082/ws' });
+
+ws.subscribe({
+  next: (msg) => console.log('recv', msg),
+  error: (e) => console.error(e),
+  complete: () => console.log('closed'),
 });
 
-// ── Client (sender) ──────────────────────────────────────────────────────────
-const conn = await dial(ROOT_CONTEXT, 'ws://localhost:8080/ws');
-
-const tracer = trace.getTracer('my-service');
-const span = tracer.startSpan('send-message');
-const ctx = trace.setSpan(ROOT_CONTEXT, span);
-
-// Trace context is automatically injected into the message body.
-await conn.writeMessage(ctx, TextMessage, Buffer.from('hello'));
+const span = trace.getTracer('app').startSpan('send');
+context.with(trace.setSpan(context.active(), span), () => {
+  ws.next({ text: 'hello' });
+});
 span.end();
-
-// ── Server (receiver) ────────────────────────────────────────────────────────
-const wss = new WebSocketServer({ port: 8080 });
-wss.on('connection', (rawWs) => {
-  const serverConn = newConn(rawWs);
-  const handle = async () => {
-    // recvCtx carries the propagated span from the client.
-    const [recvCtx, , data] = await serverConn.readMessage(ROOT_CONTEXT);
-
-    // Create a child span linked to the client's trace.
-    const childSpan = tracer.startSpan('handle-message', {}, recvCtx);
-    console.log('received:', data.toString());
-    childSpan.end();
-  };
-  handle();
-});
 ```
 
 ### API
 
-#### `newConn(ws, opts?): Conn`
-
-Wraps an existing `ws.WebSocket` with trace-context propagation.
-
-#### `dial(ctx, url, headers?, opts?): Promise<Conn>`
-
-Convenience dial helper – connects and returns a `Conn`.
-
-#### `conn.writeMessage(ctx, messageType, data): Promise<void>`
-
-Encodes `data` into a JSON envelope containing the W3C trace headers from `ctx`, then sends it.  Creates a `websocket.send` producer span.
-
-#### `conn.readMessage(ctx): Promise<[Context, number, Buffer]>`
-
-Reads the next message, extracts the trace headers, and returns `[context, messageType, payload]`.  Creates a `websocket.receive` consumer span linked to the sender's span.
-
-#### `conn.close(): void`
-
-Closes the underlying WebSocket.
-
-#### Options
-
-```typescript
-interface Options {
-  propagator?: TextMapPropagator;   // default: global propagation API
-  tracerProvider?: TracerProvider;  // default: trace.getTracerProvider()
-}
-```
+Identical to [`rxjs/webSocket`](https://rxjs.dev/api/webSocket): exports only `webSocket`, `WebSocketSubject`, and `WebSocketSubjectConfig`. `webSocket(url | config)` returns a `WebSocketSubject<T>` (instrumented under the hood). No extra options beyond what RxJS accepts.
 
 ### Spans created
 
-| Method | Span name | Kind |
-|--------|-----------|------|
-| `writeMessage` | `websocket.send` | Producer |
-| `readMessage` | `websocket.receive` | Consumer |
+| Path | Span name | Kind |
+|------|-----------|------|
+| `next` (outgoing) | `websocket.send` | Producer |
+| Incoming message | `websocket.receive` | Consumer |
 
-`readMessage` creates a span **linked** to the sender's span (not parent-child), following the OTel async messaging convention.
+`websocket.receive` is a child of the extracted sender context when trace context is present.
 
-### Wire format compatibility
+---
 
-Every `writeMessage` call wraps the payload in a JSON envelope:
+## @marz32one/otel-ws
 
-```json
-{ "headers": { "traceparent": "00-…-01" }, "payload": "<base64>" }
+Native Node.js `ws` wrapper. Same envelope wire format as `otel-rxjs-ws`.
+
+Automatically prepends `otel-ws` and `json` to the subprotocol list. Envelope injection is active only when `otel-ws` is confirmed by the server.
+
+```typescript
+import WebSocket from '@marz32one/otel-ws';
+
+const ws = new WebSocket('ws://localhost:8085/otel-ws');
+ws.on('open', () => {
+  ws.send({ text: 'hello' });
+});
+ws.on('message', (msg) => {
+  console.log('recv', msg);
+});
 ```
 
-The payload is base64-encoded to match Go's `json.Marshal([]byte)` behaviour – this ensures a TypeScript client can communicate with the Go server and vice-versa.
+Use `OtelWebSocket.Server` for auto-instrumented server-side sockets:
 
-If the other side sends a plain (non-envelope) message, `readMessage` returns the raw bytes unchanged with no span context – making it safe to introduce the library incrementally.
+```typescript
+import OtelWebSocket from '@marz32one/otel-ws';
+
+const wss = new OtelWebSocket.Server({ port: 8085 });
+wss.on('connection', (ws) => {
+  ws.on('message', (msg) => ws.send({ ack: true }));
+});
+```
+
+---
+
+## Diagnostic logging
+
+Both packages log via the [OpenTelemetry `diag` API](https://opentelemetry.io/docs/languages/js/api/#diag) — no output by default. Enable with a `DiagConsoleLogger` in the application entry point:
+
+**Node.js** (`ws-node-backend` or any Node app):
+
+```typescript
+import { diag, DiagConsoleLogger, DiagLogLevel } from '@opentelemetry/api';
+diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.DEBUG);
+```
+
+Or via the `OTEL_LOG_LEVEL` environment variable (if the app reads it):
+
+```bash
+OTEL_LOG_LEVEL=debug node dist/index.js
+```
+
+**Browser** (Vite — add to `tracing.ts` before provider init):
+
+```typescript
+import { diag, DiagConsoleLogger, DiagLogLevel } from '@opentelemetry/api';
+diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.DEBUG);
+```
+
+Or via the `VITE_OTEL_LOG_LEVEL` environment variable if the app reads it (e.g. `.env.local`):
+
+```env
+VITE_OTEL_LOG_LEVEL=debug
+```
+
+Supported levels: `verbose`, `debug`, `info`, `warn`, `error`.
 
 ---
 
@@ -165,6 +166,6 @@ make clean
 ### Publishing
 
 ```bash
-cd packages/otel-websocket
+cd packages/otel-rxjs-ws
 npm publish --access public
 ```

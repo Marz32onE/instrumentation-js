@@ -4,9 +4,9 @@
 install:
 	npm install
 
-# Build all packages
+# Build publishable packages
 build:
-	npm run build --workspaces
+	npm run build -w packages/otel-ws -w packages/otel-rxjs-ws
 
 # Run all tests
 test:
@@ -22,4 +22,4 @@ clean:
 
 # Dry-run publish (verify package contents without uploading)
 publish-dry:
-	cd packages/otel-websocket && npm pack --dry-run
+	cd packages/otel-rxjs-ws && npm pack --dry-run

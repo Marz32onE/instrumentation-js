@@ -2,7 +2,8 @@
   "name": "instrumentation-js",
   "private": true,
   "workspaces": [
-    "packages/*"
+    "packages/otel-ws",
+    "packages/otel-rxjs-ws"
   ],
   "scripts": {
     "build": "npm run build --workspaces",
