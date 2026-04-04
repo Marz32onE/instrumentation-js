@@ -5,6 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Overview
 
 npm workspaces monorepo with two OpenTelemetry WebSocket instrumentation packages:
+
 - **`packages/otel-ws`** (`@marz32one/otel-ws`) — native Node.js `ws` library wrapper
 - **`packages/otel-rxjs-ws`** (`@marz32one/otel-rxjs-ws`) — drop-in replacement for `rxjs/webSocket`
 
@@ -22,6 +23,7 @@ make publish-dry   # Dry-run npm pack for otel-rxjs-ws
 ```
 
 Per-package (run inside `packages/otel-ws/` or `packages/otel-rxjs-ws/`):
+
 ```bash
 npm run build
 npm run test
@@ -32,16 +34,45 @@ NODE_OPTIONS=--experimental-vm-modules npx jest test/index.test.ts
 
 ## Wire Protocol
 
-Both packages use an **envelope format**:
+## Test Prerequisites
+
+`packages/otel-nats` tests spin up a real `nats-server` process. It must be in `PATH`:
+
+```bash
+brew install nats-server
+```
+
+To skip spawning and point tests at an existing server:
+
+```bash
+NATS_URL=nats://127.0.0.1:4222 npm run test      # TCP tests
+NATS_WS_URL=ws://127.0.0.1:9222 npm run test     # WebSocket tests (requires NATS_URL too)
+```
+
+## CI
+
+`.github/workflows/ci.yml` runs on push/PR to `main` for any change in `packages/**/*.ts|js|cjs|mjs`, `package*.json`, `eslint.config.*`, `tsconfig*.json`, `Makefile`, or workflow files. Tested on Node 18 and 20. Steps: `install → lint → test → build`.
+
+## Wire Protocol (otel-ws / otel-rxjs-ws)
+
+- **Client offer**: first subprotocol token is always `otel-ws`, followed by optional bare user subprotocols `P1, P2, …` (no `otel-ws+P` encoding). `json` is **not** auto-inserted.
+- **`OtelWebSocket.Server`**: if the client offer’s first token is `otel-ws`, the wrapper strips it and calls `userHandleProtocols` on the rest; the HTTP response uses the **bare** selected subprotocol `S` from that rest list (RFC-compliant). If the rest is empty, the server answers `otel-ws` and does not call the user handler.
+- **Envelope** (`isOtelActive`): `OtelWebSocket` enables it on every successful `open`. `OtelWebSocket.Server` enables it per socket when the **first** token of `Sec-WebSocket-Protocol` on the upgrade request is `otel-ws` (even if the negotiated subprotocol is a bare `Pi`). Server-side activation reads the negotiated subprotocol via `_protocol` when present, otherwise the public `protocol` getter.
+- **User-facing `protocol`**: strip an `otel-ws+` prefix (8 chars) for display; map negotiated `otel-ws` alone to `''`.
+- **RxJS**: `WebSocketSubjectConfig` includes optional `prependOtelSubprotocol` (default `true`). Set `false` to connect without offering `otel-ws` (e.g. native server that only negotiates `json`).
+
+Envelope format when active:
+
 ```json
 { "header": { "traceparent": "...", "tracestate": "..." }, "data": <user payload> }
 ```
 
-Envelope is only active when the `otel-ws` subprotocol is negotiated during WebSocket handshake. When the subprotocol is NOT negotiated, payloads pass through unchanged (no envelope, spans still created).
+When inactive: payloads pass through unchanged (spans may still be created).
 
 ## Architecture
 
 ### otel-ws
+
 - Patches `ws.send()` to wrap outgoing payloads in the envelope (PRODUCER span)
 - Patches `ws._sender.sendFrame()` at the binary frame level to inject trace context into JSON frames (handles already-serialized data)
 - Uses Symbols to store internal state on `WebSocket` instances to avoid property collision
@@ -49,12 +80,15 @@ Envelope is only active when the `otel-ws` subprotocol is negotiated during WebS
 - `SKIP_FRAME_INJECT_KEY` on the OTel context prevents double-wrapping between the two patch layers
 
 ### otel-rxjs-ws
+
 - Extends RxJS `WebSocketSubject` directly for API compatibility
 - Maintains context queues (`_pendingSendContexts`, `_pendingReceiveCtxs`) because RxJS may buffer messages before the socket is open — context is captured at `next()` time and applied during serialization
 - Overrides `_subscribe()` to inject the extracted receive context into the observable pipeline before delivering to subscribers
 
 ### Span Attributes
+
 Both packages create spans named `websocket.send` (PRODUCER) and `websocket.receive` (CONSUMER) with:
+
 ```
 messaging.system = 'websocket'
 messaging.operation = 'send' | 'receive'
@@ -66,13 +100,15 @@ Both test suites use `InMemorySpanExporter` + `NodeTracerProvider` with `W3CTrac
 
 ```typescript
 // Standard OTel test setup used across both packages
-const exporter = new InMemorySpanExporter()
+const exporter = new InMemorySpanExporter();
 const provider = new NodeTracerProvider({
-  spanProcessors: [new SimpleSpanProcessor(exporter)]
-})
-provider.register({ propagator: new CompositePropagator({
-  propagators: [new W3CTraceContextPropagator(), new W3CBaggagePropagator()]
-}) })
+  spanProcessors: [new SimpleSpanProcessor(exporter)],
+});
+provider.register({
+  propagator: new CompositePropagator({
+    propagators: [new W3CTraceContextPropagator(), new W3CBaggagePropagator()],
+  }),
+});
 ```
 
 ## Key Files

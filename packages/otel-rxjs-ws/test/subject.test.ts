@@ -215,6 +215,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
       url: `ws://127.0.0.1:${port}`,
       WebSocketCtor: WS_CTOR,
       protocol: 'json',
+      prependOtelSubprotocol: false,
     });
     const sub = ws.subscribe();
     ws.next({ plain: true });
