@@ -12,9 +12,9 @@ build:
 test:
 	npm run test --workspaces
 
-# Type-check without emitting (lint)
+# Type-check (tsc --noEmit) + ESLint (see eslint.config.mjs)
 lint:
-	npm run lint --workspaces
+	npm run lint
 
 # Remove build artifacts
 clean:
