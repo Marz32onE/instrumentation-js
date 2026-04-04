@@ -32,23 +32,6 @@ npm run lint
 NODE_OPTIONS=--experimental-vm-modules npx jest test/index.test.ts
 ```
 
-## Wire Protocol
-
-## Test Prerequisites
-
-`packages/otel-nats` tests spin up a real `nats-server` process. It must be in `PATH`:
-
-```bash
-brew install nats-server
-```
-
-To skip spawning and point tests at an existing server:
-
-```bash
-NATS_URL=nats://127.0.0.1:4222 npm run test      # TCP tests
-NATS_WS_URL=ws://127.0.0.1:9222 npm run test     # WebSocket tests (requires NATS_URL too)
-```
-
 ## CI
 
 `.github/workflows/ci.yml` runs on push/PR to `main`. Parallel jobs (each on Node 18 and 20): **lint** (`make lint`: `tsc --noEmit` + ESLint), **test** (`make test`), **build** (`make build`). Optional: `npm run lint:typecheck` or `npm run lint:eslint` to run one checker only.

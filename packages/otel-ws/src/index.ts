@@ -475,8 +475,8 @@ function patchNativeSend(
     [ORIGINAL_SEND_SYMBOL]?: BaseWebSocket["send"];
   };
   if (wsAny[ORIGINAL_SEND_SYMBOL]) return;
-  wsAny[ORIGINAL_SEND_SYMBOL] = ws.send.bind(ws);
-  const originalSend = wsAny[ORIGINAL_SEND_SYMBOL];
+  const originalSend = ws.send.bind(ws);
+  wsAny[ORIGINAL_SEND_SYMBOL] = originalSend;
 
   ws.send = ((data: unknown, optionsOrCb?: unknown, cbMaybe?: unknown) => {
     const cb = (typeof optionsOrCb === "function" ? optionsOrCb : cbMaybe) as
@@ -544,8 +544,8 @@ function patchNativeSendFrame(
   }
   if (withInternals[ORIGINAL_SEND_FRAME_SYMBOL]) return;
 
-  withInternals[ORIGINAL_SEND_FRAME_SYMBOL] = sender.sendFrame.bind(sender);
-  const originalSendFrame = withInternals[ORIGINAL_SEND_FRAME_SYMBOL];
+  const originalSendFrame = sender.sendFrame.bind(sender);
+  withInternals[ORIGINAL_SEND_FRAME_SYMBOL] = originalSendFrame;
 
   sender.sendFrame = (
     list: ReadonlyArray<Buffer>,
