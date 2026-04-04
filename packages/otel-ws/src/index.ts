@@ -35,6 +35,11 @@ type WsWithInternals = BaseWebSocket & {
   };
 };
 
+type WsHandleProtocols = (
+  protocols: Set<string>,
+  request: IncomingMessage,
+) => string | false;
+
 const OTEL_WS_PROTOCOL = "otel-ws";
 /** Defensive / non-RFC wire prefix; negotiated subprotocol is usually bare `Pi` or `otel-ws`. */
 const OTEL_WS_INSTRUMENTED_PREFIX = `${OTEL_WS_PROTOCOL}+`;
