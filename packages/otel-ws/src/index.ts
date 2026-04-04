@@ -173,33 +173,6 @@ function startMessagingSpan(
   );
 }
 
-export class OtelWebSocket extends BaseWebSocket {
-  constructor(
-    address: string,
-    protocols?: string | string[],
-    options?: BaseWebSocket.ClientOptions,
-  ) {
-    const user = [...new Set(normalizeUserProtocols(protocols))];
-    super(address, buildClientProtocolOffer(protocols), options);
-    (this as WsRecord)[USER_PROTO_LIST_SYMBOL] = user;
-    // This client always offers `otel-ws`; any successful handshake used that offer, so enable envelope on open.
-    // (Do not gate on reading `_protocol` here — subclass / timing can leave it empty in the first `open` tick.)
-    (this as unknown as EventEmitter).prependOnceListener("open", () => {
-      setOtelActive(this);
-      // `ws` types `protocol` as a data field; replace with a facade after handshake (RFC uses bare `Pi`).
-      Object.defineProperty(this, "protocol", {
-        configurable: true,
-        enumerable: true,
-        get: () =>
-          userFacingProtocolFromWire(
-            (this as unknown as { _protocol?: string })._protocol ?? "",
-          ),
-      });
-    });
-    instrumentSocket(this);
-  }
-}
-
 class InstrumentedWebSocketServer extends BaseWebSocket.Server {
   constructor(options?: BaseWebSocket.ServerOptions, callback?: () => void) {
     // ws@5 ServerOptions types model handleProtocols loosely; narrow at runtime boundary.
@@ -249,9 +222,34 @@ class InstrumentedWebSocketServer extends BaseWebSocket.Server {
   }
 }
 
-export namespace OtelWebSocket {
-  export const Server: typeof BaseWebSocket.Server =
+export class OtelWebSocket extends BaseWebSocket {
+  static readonly Server: typeof BaseWebSocket.Server =
     InstrumentedWebSocketServer;
+
+  constructor(
+    address: string,
+    protocols?: string | string[],
+    options?: BaseWebSocket.ClientOptions,
+  ) {
+    const user = [...new Set(normalizeUserProtocols(protocols))];
+    super(address, buildClientProtocolOffer(protocols), options);
+    (this as WsRecord)[USER_PROTO_LIST_SYMBOL] = user;
+    // This client always offers `otel-ws`; any successful handshake used that offer, so enable envelope on open.
+    // (Do not gate on reading `_protocol` here — subclass / timing can leave it empty in the first `open` tick.)
+    (this as unknown as EventEmitter).prependOnceListener("open", () => {
+      setOtelActive(this);
+      // `ws` types `protocol` as a data field; replace with a facade after handshake (RFC uses bare `Pi`).
+      Object.defineProperty(this, "protocol", {
+        configurable: true,
+        enumerable: true,
+        get: () =>
+          userFacingProtocolFromWire(
+            (this as unknown as { _protocol?: string })._protocol ?? "",
+          ),
+      });
+    });
+    instrumentSocket(this);
+  }
 }
 
 export default OtelWebSocket;
@@ -348,17 +346,25 @@ function finishSendSpan(
   cb?.(sendErr);
 }
 
+function wireDataToUtf8(raw: BaseWebSocket.Data): string {
+  if (typeof raw === "string") return raw;
+  if (Buffer.isBuffer(raw)) return raw.toString("utf8");
+  if (raw instanceof ArrayBuffer) return Buffer.from(raw).toString("utf8");
+  if (ArrayBuffer.isView(raw)) {
+    return Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString(
+      "utf8",
+    );
+  }
+  if (Array.isArray(raw)) return Buffer.concat(raw).toString("utf8");
+  return "";
+}
+
 function withExtractedReceiveContext(
   raw: BaseWebSocket.Data,
   tracer: ReturnType<ReturnType<typeof getTracerProvider>["getTracer"]>,
   run: (data: unknown, outCtx: Context) => void,
 ): void {
-  const body =
-    typeof raw === "string"
-      ? raw
-      : Buffer.isBuffer(raw)
-        ? raw.toString("utf8")
-        : raw.toString();
+  const body = wireDataToUtf8(raw);
   const parsed = deserializeMessage(body);
 
   const carrier: Record<string, string> = {};
@@ -418,9 +424,9 @@ function patchNativeOnMessage(
     wsAny[WRAPPED_HANDLERS_SYMBOL] = new WeakMap<WsListener, WsListener>();
   }
 
-  const originalOn = wsAny[ORIGINAL_ON_SYMBOL]! as WsEmitGeneric;
-  const originalOff = wsAny[ORIGINAL_OFF_SYMBOL]! as WsEmitGeneric;
-  const wrappedHandlers = wsAny[WRAPPED_HANDLERS_SYMBOL]!;
+  const originalOn = wsAny[ORIGINAL_ON_SYMBOL] as WsEmitGeneric;
+  const originalOff = wsAny[ORIGINAL_OFF_SYMBOL] as WsEmitGeneric;
+  const wrappedHandlers = wsAny[WRAPPED_HANDLERS_SYMBOL];
   ws.on = ((event: WsMessageEvent, listener: WsListener) => {
     if (event !== "message" || typeof listener !== "function") {
       return originalOn(event, listener);
@@ -470,7 +476,7 @@ function patchNativeSend(
   };
   if (wsAny[ORIGINAL_SEND_SYMBOL]) return;
   wsAny[ORIGINAL_SEND_SYMBOL] = ws.send.bind(ws);
-  const originalSend = wsAny[ORIGINAL_SEND_SYMBOL]!;
+  const originalSend = wsAny[ORIGINAL_SEND_SYMBOL];
 
   ws.send = ((data: unknown, optionsOrCb?: unknown, cbMaybe?: unknown) => {
     const cb = (typeof optionsOrCb === "function" ? optionsOrCb : cbMaybe) as
@@ -539,7 +545,7 @@ function patchNativeSendFrame(
   if (withInternals[ORIGINAL_SEND_FRAME_SYMBOL]) return;
 
   withInternals[ORIGINAL_SEND_FRAME_SYMBOL] = sender.sendFrame.bind(sender);
-  const originalSendFrame = withInternals[ORIGINAL_SEND_FRAME_SYMBOL]!;
+  const originalSendFrame = withInternals[ORIGINAL_SEND_FRAME_SYMBOL];
 
   sender.sendFrame = (
     list: ReadonlyArray<Buffer>,

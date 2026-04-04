@@ -324,7 +324,7 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
     );
     const outCtx = trace.setSpan(senderCtx, span);
 
-    let result = parsed.data as T;
+    let result = parsed.data;
     if (this._userDeserializer) {
       const payload =
         typeof result === 'object' && result !== null

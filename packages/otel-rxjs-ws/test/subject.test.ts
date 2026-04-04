@@ -44,7 +44,7 @@ function setupOTel() {
     exporter,
     provider,
     teardown: () => {
-      provider.shutdown();
+      void provider.shutdown();
       propagation.disable();
       trace.disable();
     },

@@ -17,7 +17,7 @@ Both packages share the same wire protocol and architectural patterns. They use 
 make install       # npm install (all workspace deps)
 make build         # Build all packages (TypeScript → dist/)
 make test          # Run Jest across all packages
-make lint          # TypeScript type-check (tsc --noEmit)
+make lint          # Type-check (tsc --noEmit) + ESLint (typescript-eslint)
 make clean         # Remove dist/ artifacts
 make publish-dry   # Dry-run npm pack for otel-rxjs-ws
 ```
@@ -51,7 +51,7 @@ NATS_WS_URL=ws://127.0.0.1:9222 npm run test     # WebSocket tests (requires NAT
 
 ## CI
 
-`.github/workflows/ci.yml` runs on push/PR to `main` for any change in `packages/**/*.ts|js|cjs|mjs`, `package*.json`, `eslint.config.*`, `tsconfig*.json`, `Makefile`, or workflow files. Tested on Node 18 and 20. Steps: `install → lint → test → build`.
+`.github/workflows/ci.yml` runs on push/PR to `main`. Parallel jobs (each on Node 18 and 20): **lint** (`make lint`: `tsc --noEmit` + ESLint), **test** (`make test`), **build** (`make build`). Optional: `npm run lint:typecheck` or `npm run lint:eslint` to run one checker only.
 
 ## Wire Protocol (otel-ws / otel-rxjs-ws)
 

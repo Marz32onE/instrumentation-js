@@ -41,7 +41,7 @@ function setupOTel() {
     exporter,
     provider,
     teardown: () => {
-      provider.shutdown();
+      void provider.shutdown();
       propagation.disable();
       trace.disable();
     },
@@ -271,7 +271,7 @@ describe('otel-ws', () => {
 
     wss.on('connection', (rawWs) => {
       const ws = instrumentSocket(rawWs as unknown as WebSocket);
-      ws.on('message', (msg) => {
+      ws.on('message', () => {
         receiveTraceIds.push(trace.getSpanContext(context.active())?.traceId);
 
         ws.send({ ack: true, via: 'send' });
