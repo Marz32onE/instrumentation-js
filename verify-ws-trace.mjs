@@ -63,6 +63,7 @@ const ack = await new Promise((resolve, reject) => {
 
   subject = webSocket({
     url: wsUrl,
+    protocol: 'json',
     openObserver: {
       next: () => {
         const parent = tracer.startSpan('verify-client-send', {
@@ -95,7 +96,7 @@ const traceId = ack?.traceId;
 if (!traceId) {
   console.error('Expected ack.traceId, got:', ack);
   console.error(
-    "Hint: verify wsUrl points to /otel-ws and Sec-WebSocket-Protocol negotiation succeeded with 'otel-ws'.",
+    "Hint: verify wsUrl points to /otel-ws; offer json subprotocol (otel-ws+json + json) and negotiate otel-ws+json.",
   );
   process.exit(1);
 }

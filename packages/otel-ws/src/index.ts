@@ -162,7 +162,9 @@ export class OtelWebSocket extends BaseWebSocket {
     }
 
     const offer =
-      user.length === 0 ? [OTEL_WS_PROTOCOL] : [OTEL_WS_PROTOCOL, ...user];
+      user.length === 0
+        ? [OTEL_WS_PROTOCOL]
+        : [...user.map(p => `${OTEL_WS_INSTRUMENTED_PREFIX}${p}`), ...user];
     super(address, offer, options);
     (this as WsRecord)[USER_PROTO_LIST_SYMBOL] = user;
     (this as unknown as EventEmitter).prependOnceListener("open", () => {
@@ -190,6 +192,7 @@ export class OtelWebSocket extends BaseWebSocket {
   }
 }
 
+// eslint-disable-next-line @typescript-eslint/no-namespace
 export namespace OtelWebSocket {
   /** Instrumented WebSocket server. Mirrors WebSocket.Server from the ws package. */
   export class Server extends BaseWebSocket.Server {
@@ -209,9 +212,8 @@ export namespace OtelWebSocket {
             if (!userHandleProtocols) return false;
 
             const list = [...protocols];
-            if (list[0] === OTEL_WS_PROTOCOL) {
+            if (list.some(p => p === OTEL_WS_PROTOCOL || p.startsWith(OTEL_WS_INSTRUMENTED_PREFIX))) {
               // Filter out all otel-ws sentinel tokens; pass only bare user protocols.
-              // Backward-compatible: handles both new ["otel-ws","json"] and legacy ["otel-ws+json","otel-ws","json"] offers.
               const userProtos = list.filter(
                 (p) =>
                   p !== OTEL_WS_PROTOCOL &&
@@ -240,6 +242,13 @@ export namespace OtelWebSocket {
           (typeof first === "string" &&
             first.startsWith(OTEL_WS_INSTRUMENTED_PREFIX));
         instrumentSocket(ws, { envelope });
+        // Strip otel-ws+ prefix so server-side users see the clean protocol name.
+        const rawProtocol = ws.protocol;
+        Object.defineProperty(ws, "protocol", {
+          configurable: true,
+          enumerable: true,
+          get: () => userFacingProtocolFromWire(rawProtocol),
+        });
       });
     }
   }

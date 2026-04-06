@@ -36,10 +36,12 @@ function normalizeUserProtocols(protocols?: string | string[]): string[] {
   return arr.filter((p): p is string => typeof p === 'string' && p.length > 0 && p !== OTEL_WS_PROTOCOL);
 }
 
-/** Offer: `otel-ws` first, then bare user protocols (no `otel-ws+P`). */
+/** Offer: compound `otel-ws+P` tokens first, then bare user protocols. No bare `otel-ws` sentinel when user protocols exist. */
 function buildClientProtocolOffer(protocols?: string | string[]): string[] {
   const user = [...new Set(normalizeUserProtocols(protocols))];
-  return user.length === 0 ? [OTEL_WS_PROTOCOL] : [OTEL_WS_PROTOCOL, ...user];
+  return user.length === 0
+    ? [OTEL_WS_PROTOCOL]
+    : [...user.map(p => `${OTEL_WS_INSTRUMENTED_PREFIX}${p}`), ...user];
 }
 
 function userFacingProtocolFromWire(wire: string): string {
