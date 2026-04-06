@@ -52,11 +52,29 @@ function userFacingProtocolFromWire(wire: string): string {
   return wire;
 }
 
-function clientEnvelopeActive(wire: string, userProtocols: readonly string[]): boolean {
-  if (wire === OTEL_WS_PROTOCOL || wire.startsWith(OTEL_WS_INSTRUMENTED_PREFIX)) {
-    return true;
+/**
+ * Client: enable envelope only when the server explicitly acknowledged otel-ws by returning
+ * "otel-ws" (bare) or the "otel-ws+<subprotocol>" prefix — NOT for bare user subprotocols.
+ * Matches otel-ws `OtelWebSocket` / otel-ws.md Case C (downgrade when server returns bare Pi).
+ */
+function clientEnvelopeActive(wire: string): boolean {
+  return (
+    wire === OTEL_WS_PROTOCOL || wire.startsWith(OTEL_WS_INSTRUMENTED_PREFIX)
+  );
+}
+
+const EMPTY_USER_SUBPROTOCOL_ERROR =
+  'OtelWebSocket: at least one non-empty user subprotocol is required when protocols are specified.';
+
+function assertNonEmptyUserSubprotocolWhenSpecified(
+  prepend: boolean,
+  protocolField: string | string[] | undefined,
+): void {
+  if (!prepend || protocolField === undefined) return;
+  const user = [...new Set(normalizeUserProtocols(protocolField))];
+  if (user.length === 0) {
+    throw new Error(EMPTY_USER_SUBPROTOCOL_ERROR);
   }
-  return userProtocols.length > 0 && userProtocols.includes(wire);
 }
 
 function defaultSerializer<T>(value: T): string {
@@ -88,7 +106,6 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
   private readonly _userDeserializer: NonNullable<
     WebSocketSubjectConfig<T>['deserializer']
   > | null;
-  private readonly _userSubprotocolsForEnvelope: readonly string[];
   private _otelProtocolActive = false;
 
   constructor(urlOrConfig: string | WebSocketSubjectConfig<T>) {
@@ -106,6 +123,8 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
 
     const prepend = prependOtelSubprotocol !== false;
 
+    assertNonEmptyUserSubprotocolWhenSpecified(prepend, configIn.protocol);
+
     const userOpenObserver = configIn.openObserver;
     const userCloseObserver = configIn.closingObserver;
     const merged: WebSocketSubjectConfig<T> = {
@@ -117,10 +136,7 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
         next: (event: Event) => {
           const target = event.target as WebSocket | null;
           const rawProtocol = target?.protocol ?? '';
-          holder.inst!._otelProtocolActive = clientEnvelopeActive(
-            rawProtocol,
-            holder.inst!._userSubprotocolsForEnvelope,
-          );
+          holder.inst!._otelProtocolActive = clientEnvelopeActive(rawProtocol);
           if (prepend && target) {
             const facade = userFacingProtocolFromWire(rawProtocol);
             Object.defineProperty(target, 'protocol', {
@@ -149,9 +165,6 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
 
     this._userSerializer = userSerializer ?? null;
     this._userDeserializer = userDeserializer ?? null;
-    this._userSubprotocolsForEnvelope = prepend
-      ? Object.freeze([...new Set(normalizeUserProtocols(configIn.protocol))])
-      : Object.freeze([]);
     this._tracer = getTracerProvider().getTracer('@marz32one/otel-rxjs-ws', version());
   }
 

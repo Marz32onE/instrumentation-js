@@ -231,6 +231,66 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     await new Promise<void>((resolve) => wss.close(() => resolve()));
   });
 
+  describe('otel-ws.md spec (client parity with otel-ws)', () => {
+    it('Case C: prepend default + protocol json + plain server returns bare json → no envelope', async () => {
+      let resolveFirst: ((msg: string) => void) | null = null;
+      const firstMessage = new Promise<string>((resolve) => {
+        resolveFirst = resolve;
+      });
+      const wss = new WebSocketServer({
+        port: 0,
+        handleProtocols: (protocols: Set<string>) =>
+          protocols.has('json') ? 'json' : false,
+      });
+      wss.on('connection', (sock) => {
+        sock.on('message', (data) => {
+          if (resolveFirst) {
+            resolveFirst(data.toString());
+            resolveFirst = null;
+          }
+        });
+      });
+      const port = (wss.address() as AddressInfo).port;
+      const ws = webSocket<{ plain: boolean }>({
+        url: `ws://127.0.0.1:${port}`,
+        WebSocketCtor: WS_CTOR,
+        protocol: 'json',
+      });
+      const sub = ws.subscribe();
+      ws.next({ plain: true });
+
+      const raw = await firstMessage;
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      expect(parsed.header).toBeUndefined();
+      expect(parsed.plain).toBe(true);
+
+      sub.unsubscribe();
+      ws.complete();
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+    });
+
+    it('Case E: explicit empty protocol throws (matches OtelWebSocket)', () => {
+      expect(() =>
+        webSocket({
+          url: 'ws://127.0.0.1:1',
+          WebSocketCtor: WS_CTOR,
+          protocol: '',
+        }),
+      ).toThrow(
+        'OtelWebSocket: at least one non-empty user subprotocol is required when protocols are specified.',
+      );
+      expect(() =>
+        webSocket({
+          url: 'ws://127.0.0.1:1',
+          WebSocketCtor: WS_CTOR,
+          protocol: [],
+        }),
+      ).toThrow(
+        'OtelWebSocket: at least one non-empty user subprotocol is required when protocols are specified.',
+      );
+    });
+  });
+
   it('creates a CONSUMER span on receive', async () => {
     const msg = JSON.stringify({
       header: { traceparent: '00-12345678901234567890123456789012-0123456789012345-01' },
