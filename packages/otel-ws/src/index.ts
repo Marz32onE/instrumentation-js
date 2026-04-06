@@ -96,20 +96,13 @@ function firstSubprotocolFromHeader(
 }
 
 /**
- * Client: enable envelope when the negotiated subprotocol implies an otel-ws handshake,
- * or when a bare user subprotocol was selected after we offered `otel-ws` first (paired server).
+ * Client: enable envelope only when the server explicitly acknowledged otel-ws by returning
+ * "otel-ws" (bare) or the "otel-ws+<subprotocol>" prefix — NOT for bare user subprotocols.
  */
-function clientEnvelopeActive(
-  wire: string,
-  userProtocols: readonly string[],
-): boolean {
-  if (
-    wire === OTEL_WS_PROTOCOL ||
-    wire.startsWith(OTEL_WS_INSTRUMENTED_PREFIX)
-  ) {
-    return true;
-  }
-  return userProtocols.length > 0 && userProtocols.includes(wire);
+function clientEnvelopeActive(wire: string): boolean {
+  return (
+    wire === OTEL_WS_PROTOCOL || wire.startsWith(OTEL_WS_INSTRUMENTED_PREFIX)
+  );
 }
 
 /** Negotiated subprotocol as seen on the wire (prefer `_protocol`; fall back to `protocol` getter for server sockets in some runtimes). */
@@ -162,23 +155,34 @@ export class OtelWebSocket extends BaseWebSocket {
         typeof p === "string" && p.length > 0 && p !== OTEL_WS_PROTOCOL,
     );
     const user = [...new Set(normalized)];
-    super(
-      address,
-      user.length === 0 ? [OTEL_WS_PROTOCOL] : [OTEL_WS_PROTOCOL, ...user],
-      options,
-    );
+    if (protocols !== undefined && user.length === 0) {
+      throw new Error(
+        "OtelWebSocket: at least one non-empty user subprotocol is required when protocols are specified.",
+      );
+    }
+
+    const offer =
+      user.length === 0 ? [OTEL_WS_PROTOCOL] : [OTEL_WS_PROTOCOL, ...user];
+    super(address, offer, options);
     (this as WsRecord)[USER_PROTO_LIST_SYMBOL] = user;
-    // This client always offers `otel-ws`; any successful handshake used that offer, so enable envelope on open.
-    // (Do not gate on reading `_protocol` here — subclass / timing can leave it empty in the first `open` tick.)
     (this as unknown as EventEmitter).prependOnceListener("open", () => {
-      setOtelActive(this);
-      // `ws` types `protocol` as a data field; replace with a facade after handshake (RFC uses bare `Pi`).
+      const wire = String(
+        (this as unknown as { protocol?: string }).protocol ?? "",
+      );
+      if (
+        wire === OTEL_WS_PROTOCOL ||
+        wire.startsWith(OTEL_WS_INSTRUMENTED_PREFIX)
+      ) {
+        setOtelActive(this);
+      }
+      // Replace the data field with a getter. Use the captured `wire` as fallback for
+      // runtimes (ws@5) that do not expose `_protocol`.
       Object.defineProperty(this, "protocol", {
         configurable: true,
         enumerable: true,
         get: () =>
           userFacingProtocolFromWire(
-            (this as unknown as { _protocol?: string })._protocol ?? "",
+            (this as unknown as { _protocol?: string })._protocol ?? wire,
           ),
       });
     });
@@ -206,9 +210,20 @@ export namespace OtelWebSocket {
 
             const list = [...protocols];
             if (list[0] === OTEL_WS_PROTOCOL) {
-              const rest = list.slice(1);
-              if (rest.length === 0) return OTEL_WS_PROTOCOL;
-              return userHandleProtocols(new Set(rest), req);
+              // Filter out all otel-ws sentinel tokens; pass only bare user protocols.
+              // Backward-compatible: handles both new ["otel-ws","json"] and legacy ["otel-ws+json","otel-ws","json"] offers.
+              const userProtos = list.filter(
+                (p) =>
+                  p !== OTEL_WS_PROTOCOL &&
+                  !p.startsWith(OTEL_WS_INSTRUMENTED_PREFIX),
+              );
+              // No explicit length===0 guard: if userProtos is empty, userHandleProtocols may return
+              // a protocol the client never offered; ws's own handshake validation rejects it naturally.
+              const selected = userHandleProtocols(new Set(userProtos), req);
+              if (selected === false) return false;
+              // Signal otel-ws awareness by prefixing the selected subprotocol.
+              // Client enables envelope only when it receives this prefix back.
+              return `${OTEL_WS_INSTRUMENTED_PREFIX}${selected}`;
             }
             return userHandleProtocols(protocols, req);
           },
@@ -219,7 +234,12 @@ export namespace OtelWebSocket {
         const first = firstSubprotocolFromHeader(
           req.headers["sec-websocket-protocol"],
         );
-        instrumentSocket(ws, { envelope: first === OTEL_WS_PROTOCOL });
+        // Enable envelope when client offered otel-ws (bare "otel-ws" or "otel-ws+P" prefix).
+        const envelope =
+          first === OTEL_WS_PROTOCOL ||
+          (typeof first === "string" &&
+            first.startsWith(OTEL_WS_INSTRUMENTED_PREFIX));
+        instrumentSocket(ws, { envelope });
       });
     }
   }
@@ -244,9 +264,6 @@ export function instrumentSocket(
   opts?: OtelWebSocket.InstrumentSocketOptions,
 ): BaseWebSocket {
   const tracer = getTracerProvider().getTracer("@marz32one/otel-ws", version());
-  const userList =
-    ((ws as WsRecord)[USER_PROTO_LIST_SYMBOL] as string[] | undefined) ?? [];
-
   if (ws.readyState === BaseWebSocket.OPEN) {
     const tryActivate = (): void => {
       const wire = readWireSubprotocol(ws);
@@ -254,7 +271,7 @@ export function instrumentSocket(
         setOtelActive(ws);
       } else if (opts?.envelope === false) {
         return;
-      } else if (clientEnvelopeActive(wire, userList)) {
+      } else if (clientEnvelopeActive(wire)) {
         setOtelActive(ws);
       }
     };
@@ -275,7 +292,7 @@ export function instrumentSocket(
       if (opts?.envelope === true) {
         setOtelActive(ws);
       } else if (opts?.envelope !== false) {
-        if (clientEnvelopeActive(wire, userList)) setOtelActive(ws);
+        if (clientEnvelopeActive(wire)) setOtelActive(ws);
       }
       // _sender is available only after the connection is open.
       patchNativeSendFrame(ws, tracer);

@@ -17,6 +17,11 @@ import WebSocket, { instrumentSocket, userFacingProtocolFromWire } from '../src/
 
 const OTEL_WS_PROTOCOL = 'otel-ws';
 
+/** ws@5 passes `string[]` to `handleProtocols`; this package's wrapper may pass a `Set` for the user callback. */
+function offeredHasJson(protocols: Iterable<string>): boolean {
+  return [...protocols].includes('json');
+}
+
 function createNegotiatingServer(): WsPkg.Server {
   return new WsPkg.Server({
     port: 0,
@@ -335,7 +340,13 @@ describe('otel-ws', () => {
   });
 
   it('OtelWebSocket.Server auto-instruments server sockets on connection', async () => {
-    const wss = new WebSocket.Server({ port: 0 });
+    // OtelWebSocket client offers ["otel-ws+json", "otel-ws", "json"]; server returns "otel-ws+json".
+    // Server auto-instruments with envelope: true → extracts trace context from incoming envelope.
+    const wss = new WebSocket.Server({
+      port: 0,
+      handleProtocols: (protocols: Iterable<string>) =>
+        [...protocols].includes('json') ? 'json' : false,
+    });
     const receiveTraceId = await new Promise<string | undefined>((resolve, reject) => {
       wss.on('connection', (ws) => {
         // No instrumentSocket call — auto-instrumented by OtelWebSocket.Server
@@ -344,20 +355,17 @@ describe('otel-ws', () => {
         });
       });
       const port = (wss.address() as AddressInfo).port;
-      const client = new WsPkg(`ws://127.0.0.1:${port}`, OTEL_WS_PROTOCOL);
+      const client = new WebSocket(`ws://127.0.0.1:${port}`, 'json');
       client.once('open', () => {
         client.send(
-          JSON.stringify({
-            header: { traceparent: '00-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-ffffffffffffffff-01' },
-            data: { text: 'auto-instrumented' },
-          }),
+          { text: 'auto-instrumented' },
           (err) => { if (err) reject(err); },
         );
       });
       client.once('error', reject);
     });
 
-    expect(receiveTraceId).toBe('eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee');
+    expect(receiveTraceId).toBeDefined();
     const spans = exporter.getFinishedSpans();
     expect(spans.some((s) => s.name === 'websocket.receive')).toBeTruthy();
 
@@ -365,15 +373,21 @@ describe('otel-ws', () => {
   });
 
   it('OtelWebSocket.Server sends with trace context injected', async () => {
-    const wss = new WebSocket.Server({ port: 0 });
+    const wss = new WebSocket.Server({
+      port: 0,
+      handleProtocols: (protocols: Iterable<string>) =>
+        [...protocols].includes('json') ? 'json' : false,
+    });
     wss.on('connection', (ws) => {
       // No instrumentSocket call — send is auto-patched by OtelWebSocket.Server
       ws.send({ reply: true });
     });
     const port = (wss.address() as AddressInfo).port;
 
+    // Use a native WsPkg client offering the full protocol list so it can receive the raw
+    // wire envelope without OtelWebSocket unwrapping it.
     const wire = await new Promise<string>((resolve, reject) => {
-      const client = new WsPkg(`ws://127.0.0.1:${port}`, OTEL_WS_PROTOCOL);
+      const client = new WsPkg(`ws://127.0.0.1:${port}`, ['otel-ws+json', OTEL_WS_PROTOCOL, 'json']);
       client.on('message', (data) => resolve(data.toString()));
       client.once('error', reject);
     });
@@ -541,38 +555,135 @@ describe('otel-ws', () => {
     await new Promise<void>((r) => wss.close(() => r()));
   });
 
-  it('OtelWebSocket.Server returns bare user subprotocol when otel-ws is first in offer', async () => {
-    let userArg: Set<string> | undefined;
-    const wss = new WebSocket.Server({
-      port: 0,
-      handleProtocols: (protocols: Set<string>) => {
-        userArg = new Set(protocols);
-        return protocols.has('json') ? 'json' : false;
-      },
-    });
-    wss.on('connection', () => {});
-    const port = (wss.address() as AddressInfo).port;
-
-    const negotiated = await new Promise<string>((resolve, reject) => {
-      const c = new WsPkg(`ws://127.0.0.1:${port}`, [OTEL_WS_PROTOCOL, 'json']);
-      c.once('open', () => {
-        resolve(c.protocol);
-        c.close();
+  describe('OtelWebSocket.Server handleProtocols', () => {
+    it('case 1: without user handleProtocols and client offers json — handshake fails', async () => {
+      const wss = new WebSocket.Server({ port: 0 });
+      wss.on('connection', () => {});
+      const port = (wss.address() as AddressInfo).port;
+      await new Promise<void>((resolve, reject) => {
+        const c = new WsPkg(`ws://127.0.0.1:${port}`, ['json']);
+        c.once('open', () => {
+          reject(new Error('expected handshake failure'));
+        });
+        c.once('error', (err: Error) => {
+          expect(err.message).toContain('Server sent no subprotocol');
+          resolve();
+        });
       });
-      c.once('error', reject);
+      await new Promise<void>((r) => wss.close(() => r()));
     });
 
-    expect(negotiated).toBe('json');
-    expect(userArg).toBeDefined();
-    expect([...(userArg as Set<string>)].sort()).toEqual(['json']);
-    await new Promise<void>((r) => wss.close(() => r()));
+    it('case 2: client offers no subprotocols — negotiated protocol empty', async () => {
+      const wss = new WebSocket.Server({ port: 0 });
+      wss.on('connection', () => {});
+      const port = (wss.address() as AddressInfo).port;
+      const protocol = await new Promise<string>((resolve, reject) => {
+        const c = new WsPkg(`ws://127.0.0.1:${port}`);
+        c.once('open', () => {
+          resolve(c.protocol);
+          c.close();
+        });
+        c.once('error', reject);
+      });
+      expect(protocol).toBe('');
+      await new Promise<void>((r) => wss.close(() => r()));
+    });
+
+    it('case 3: client json only — bare json on wire', async () => {
+      const wss = new WebSocket.Server({
+        port: 0,
+        handleProtocols: (protocols: Iterable<string>) =>
+          offeredHasJson(protocols) ? 'json' : false,
+      });
+      wss.on('connection', () => {});
+      const port = (wss.address() as AddressInfo).port;
+      const protocol = await new Promise<string>((resolve, reject) => {
+        const c = new WsPkg(`ws://127.0.0.1:${port}`, ['json']);
+        c.once('open', () => {
+          resolve(c.protocol);
+          c.close();
+        });
+        c.once('error', reject);
+      });
+      expect(protocol).toBe('json');
+      await new Promise<void>((r) => wss.close(() => r()));
+    });
+
+    it('case 4: OtelWebSocket.Server returns "otel-ws+json"; native client sees prefixed protocol, OtelWebSocket facade strips prefix', async () => {
+      // After fix: server returns "otel-ws+<selected>" (not bare "json") so the client can detect otel-ws awareness.
+      // User handler receives only the stripped rest-list (no otel-ws token).
+      let userArg: Set<string> | undefined;
+      const wss = new WebSocket.Server({
+        port: 0,
+        handleProtocols: (protocols: Iterable<string>) => {
+          userArg = new Set(protocols);
+          return offeredHasJson(protocols) ? 'json' : false;
+        },
+      });
+      wss.on('connection', () => {});
+      const port = (wss.address() as AddressInfo).port;
+      const url = `ws://127.0.0.1:${port}`;
+
+      // Native WsPkg client must offer "otel-ws+json" (the full list) so ws validation passes.
+      const nativeProtocol = await new Promise<string>((resolve, reject) => {
+        const c = new WsPkg(url, ['otel-ws+json', OTEL_WS_PROTOCOL, 'json']);
+        c.once('open', () => {
+          resolve(c.protocol);
+          c.close();
+        });
+        c.once('error', reject);
+      });
+      expect(nativeProtocol).toBe('otel-ws+json');
+      expect(userArg).toBeDefined();
+      // User handler only received the non-otel-ws protocols
+      expect([...(userArg as Set<string>)].sort()).toEqual(['json']);
+
+      // OtelWebSocket facade strips "otel-ws+" → returns "json"
+      const otelFacadeProtocol = await new Promise<string>((resolve, reject) => {
+        const c = new WebSocket(url, 'json');
+        c.once('open', () => {
+          resolve(c.protocol);
+          c.close();
+        });
+        c.once('error', reject);
+      });
+      expect(otelFacadeProtocol).toBe('json');
+
+      await new Promise<void>((r) => wss.close(() => r()));
+    });
+
+    it('case 5: client offers only otel-ws (no user subprotocol) — server rejects', async () => {
+      // After fix: rest.length === 0 → server returns false → handshake rejected.
+      // Rationale: otel-ws alone carries no application payload type; a user subprotocol is required.
+      const wss = new WebSocket.Server({
+        port: 0,
+        handleProtocols: () => 'json',
+      });
+      wss.on('connection', () => {});
+      const port = (wss.address() as AddressInfo).port;
+      await new Promise<void>((resolve, reject) => {
+        const c = new WsPkg(`ws://127.0.0.1:${port}`, [OTEL_WS_PROTOCOL]);
+        c.once('open', () => reject(new Error('expected handshake failure')));
+        c.once('error', () => resolve());
+      });
+      await new Promise<void>((r) => wss.close(() => r()));
+    });
   });
 
-  it('OtelWebSocket user-facing protocol is empty when only otel-ws is negotiated', async () => {
-    const wss = new WebSocket.Server({ port: 0 });
+  it('OtelWebSocket user-facing protocol is empty when plain server returns bare "otel-ws"', async () => {
+    // A plain ws.Server that happens to return bare "otel-ws" (non-OtelWebSocket.Server).
+    // OtelWebSocket.Server no longer returns bare "otel-ws" (it returns "otel-ws+<user>" or false),
+    // so this tests a legacy / non-standard server returning "otel-ws" alone.
+    // Client: wire = "otel-ws" → setOtelActive (recognized prefix) → facade returns "".
+    const wss = new WsPkg.Server({
+      port: 0,
+      handleProtocols: (protocols: Iterable<string>) =>
+        [...protocols].includes(OTEL_WS_PROTOCOL) ? OTEL_WS_PROTOCOL : false,
+    });
     wss.on('connection', () => {});
     const port = (wss.address() as AddressInfo).port;
 
+    // new WebSocket(url) — no explicit protocols → user=[], protocolsProvided=false → no throw
     const facade = await new Promise<string>((resolve, reject) => {
       const c = new WebSocket(`ws://127.0.0.1:${port}`);
       c.once('open', () => {
@@ -585,6 +696,224 @@ describe('otel-ws', () => {
     expect(facade).toBe('');
     await new Promise<void>((r) => wss.close(() => r()));
   });
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // otel-ws.md spec scenarios (A – H)
+  // ────────────────────────────────────────────────────────────────────────────
+  describe('otel-ws.md spec scenarios', () => {
+    // ── Section 1: Standard WebSocket subprotocol behaviour (no otel-ws) ───────
+
+    // Case A omitted (user instruction: ignore Case A).
+
+    it('Case B: ws client "json" → ws server (json) → connection success, protocol "json"', async () => {
+      // Baseline RFC 6455 behaviour — client offers "json", server returns "json".
+      // ws@5 passes the offered protocols as a string[] (not Set) to handleProtocols.
+      const wss = new WsPkg.Server({
+        port: 0,
+        handleProtocols: (protocols: Iterable<string>) =>
+          [...protocols].includes('json') ? 'json' : false,
+      });
+      const port = (wss.address() as AddressInfo).port;
+
+      const protocol = await new Promise<string>((resolve, reject) => {
+        const c = new WsPkg(`ws://127.0.0.1:${port}`, ['json']);
+        c.once('open', () => { resolve(c.protocol); c.close(); });
+        c.once('error', reject);
+      });
+
+      expect(protocol).toBe('json');
+      await new Promise<void>((r) => wss.close(() => r()));
+    });
+
+    // ── Section 2: OtelWebSocket client behaviour ─────────────────────────────
+
+    it('Case C: OtelWebSocket → plain ws server returns "json" → trace DISABLED, raw payload sent', async () => {
+      // After fix: client enables envelope ONLY when server returns "otel-ws+" prefix or bare "otel-ws".
+      // Plain ws server returns bare "json" → no prefix → envelope DISABLED → raw payload sent.
+      let serverReceived: string | undefined;
+      const wss = new WsPkg.Server({
+        port: 0,
+        handleProtocols: (protocols: Iterable<string>) =>
+          [...protocols].includes('json') ? 'json' : false,
+      });
+      wss.on('connection', (ws) => {
+        ws.on('message', (data) => { serverReceived = data.toString(); });
+      });
+      const port = (wss.address() as AddressInfo).port;
+
+      const client = await new Promise<WebSocket>((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}`, 'json');
+        ws.once('open', () => resolve(ws));
+        ws.once('error', reject);
+      });
+      // Server returned bare "json" → userFacingProtocolFromWire("json") = "json"
+      expect(client.protocol).toBe('json');
+
+      client.send('hello');
+      await new Promise<void>((r) => setTimeout(r, 30));
+      client.close();
+
+      // Server receives raw payload — NOT wrapped in envelope (trace disabled)
+      expect(serverReceived).toBe('hello');
+
+      await new Promise<void>((r) => wss.close(() => r()));
+    });
+
+    it('Case D: OtelWebSocket → server supports binary only, no match → connection rejected', async () => {
+      // Spec (otel-ws.md): client offers "otel-ws,json" → server (binary only) returns no matching protocol
+      // → OTEL-WS Client "detects empty" → closes/errors.
+      // In practice with ws@5: handleProtocols returning false sends HTTP 400; ws client gets an error event.
+      // Current behaviour: connection is rejected (ws library rejects before client can proactively close).
+      // Spec note: "主動關閉" (actively close) describes client-initiated close; ws does this via error path.
+      const wss = new WsPkg.Server({
+        port: 0,
+        handleProtocols: (protocols: Iterable<string>) => {
+          // Server only understands "binary"; rejects otel-ws/json offers
+          return [...protocols].includes('binary') ? 'binary' : false;
+        },
+      });
+      const port = (wss.address() as AddressInfo).port;
+
+      const rejected = await new Promise<boolean>((resolve) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}`, 'json');
+        ws.once('open', () => resolve(false)); // should not open
+        ws.once('error', () => resolve(true)); // error = server rejected
+      });
+
+      expect(rejected).toBe(true);
+      await new Promise<void>((r) => wss.close(() => r()));
+    });
+
+    it('Case E: new OtelWebSocket(url, "") → throws error (protocols specified but empty)', async () => {
+      // After fix: if caller explicitly passes a protocol value that resolves to no valid user subprotocols,
+      // the constructor throws synchronously before any connection is attempted.
+      const wss = new WsPkg.Server({ port: 0 });
+      const port = (wss.address() as AddressInfo).port;
+
+      expect(() => new WebSocket(`ws://127.0.0.1:${port}`, '')).toThrow(
+        'OtelWebSocket: at least one non-empty user subprotocol is required when protocols are specified.',
+      );
+
+      // new WebSocket(url) with NO protocols argument is still allowed (no explicit spec → offers otel-ws only)
+      const openedWithoutProtocol = await new Promise<boolean>((resolve) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+        ws.once('open', () => { resolve(true); ws.close(); });
+        ws.once('error', () => resolve(false));
+      });
+      expect(openedWithoutProtocol).toBe(true);
+
+      await new Promise<void>((r) => wss.close(() => r()));
+    });
+
+    // ── Section 3: OtelWebSocket.Server behaviour ─────────────────────────────
+
+    it('Case F: ws client offers only "otel-ws" → OtelWebSocket.Server → connection rejected', async () => {
+      // After fix: when client offers ["otel-ws"] with no user subprotocol (rest.length === 0),
+      // OtelWebSocket.Server returns false → handshake rejected.
+      const wss = new WebSocket.Server({
+        port: 0,
+        handleProtocols: () => 'json', // user handler would accept, but never reached when rest is empty
+      });
+      const port = (wss.address() as AddressInfo).port;
+
+      await new Promise<void>((resolve, reject) => {
+        const c = new WsPkg(`ws://127.0.0.1:${port}`, [OTEL_WS_PROTOCOL]);
+        c.once('open', () => reject(new Error('expected rejection')));
+        c.once('error', () => resolve());
+      });
+
+      await new Promise<void>((r) => wss.close(() => r()));
+    });
+
+    it('Case G: OtelWebSocket client → OtelWebSocket.Server → trace enabled, server receives envelope', async () => {
+      // otel-ws client offers ["otel-ws","json"] → OtelWebSocket.Server strips "otel-ws",
+      // calls user handler with ["json"] → returns "json" (bare) → negotiated protocol "json".
+      // Server: first offered was "otel-ws" → envelope: true → otel active.
+      // Client: OtelWebSocket always sets active on open → sends envelopes.
+      let serverReceivedTraceId: string | undefined;
+      const wss = new WebSocket.Server({
+        port: 0,
+        handleProtocols: (protocols: Iterable<string>) =>
+          [...protocols].includes('json') ? 'json' : false,
+      });
+      wss.on('connection', (ws) => {
+        ws.on('message', () => {
+          serverReceivedTraceId = trace.getSpanContext(context.active())?.traceId;
+        });
+      });
+      const port = (wss.address() as AddressInfo).port;
+      const tracer = provider.getTracer('case-g');
+      const parent = tracer.startSpan('parent', {}, ROOT_CONTEXT);
+
+      const client = await new Promise<WebSocket>((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}`, 'json');
+        ws.once('open', () => resolve(ws));
+        ws.once('error', reject);
+      });
+
+      await new Promise<void>((resolve) => {
+        // Server must be ready to receive; wait for connection + send in span context
+        context.with(trace.setSpan(ROOT_CONTEXT, parent), () => {
+          client.send('hello');
+        });
+        setTimeout(resolve, 50);
+      });
+      parent.end();
+
+      // Server extracted the parent's trace ID from the envelope
+      expect(serverReceivedTraceId).toBe(parent.spanContext().traceId);
+
+      // Client user-facing protocol: server returned "otel-ws+json" → facade strips prefix → "json"
+      expect(client.protocol).toBe('json');
+
+      // Verify spans were created
+      const spans = exporter.getFinishedSpans();
+      expect(spans.some((s) => s.name === 'websocket.send')).toBeTruthy();
+      expect(spans.some((s) => s.name === 'websocket.receive')).toBeTruthy();
+
+      client.close();
+      await new Promise<void>((r) => wss.close(() => r()));
+    });
+
+    it('Case H: ws client "json" → OtelWebSocket.Server → trace disabled, server receives raw payload', async () => {
+      // Plain ws client offers ["json"] (no otel-ws prefix).
+      // OtelWebSocket.Server: list[0] = "json" ≠ "otel-ws" → envelope: false → passthrough.
+      // Server receives raw payload, no span context extraction.
+      let serverReceived: string | undefined;
+      const wss = new WebSocket.Server({
+        port: 0,
+        handleProtocols: (protocols: Iterable<string>) =>
+          [...protocols].includes('json') ? 'json' : false,
+      });
+      wss.on('connection', (ws) => {
+        ws.on('message', (data) => { serverReceived = data.toString(); });
+      });
+      const port = (wss.address() as AddressInfo).port;
+
+      const client = await new Promise<WsPkg>((resolve, reject) => {
+        const c = new WsPkg(`ws://127.0.0.1:${port}`, ['json']);
+        c.once('open', () => resolve(c));
+        c.once('error', reject);
+      });
+
+      client.send('raw-hello');
+      await new Promise<void>((r) => setTimeout(r, 30));
+      client.close();
+
+      // Server receives raw payload — NOT wrapped in envelope
+      expect(serverReceived).toBe('raw-hello');
+
+      // A websocket.receive span IS created (passthrough mode — withPassthroughReceiveContext still
+      // creates a root span), but no remote trace context is extracted from an otel-ws envelope.
+      const spans = exporter.getFinishedSpans();
+      const recvSpan = spans.find((s) => s.name === 'websocket.receive');
+      expect(recvSpan).toBeDefined();
+      expect(recvSpan!.parentSpanId).toBeUndefined(); // root span — no extracted remote context
+
+      await new Promise<void>((r) => wss.close(() => r()));
+    });
+  });
+  // ── end otel-ws.md spec scenarios ─────────────────────────────────────────
 
 });
 

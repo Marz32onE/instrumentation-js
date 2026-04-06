@@ -39,8 +39,8 @@ NODE_OPTIONS=--experimental-vm-modules npx jest test/index.test.ts
 ## Wire Protocol (otel-ws / otel-rxjs-ws)
 
 - **Client offer**: first subprotocol token is always `otel-ws`, followed by optional bare user subprotocols `P1, P2, …` (no `otel-ws+P` encoding). `json` is **not** auto-inserted.
-- **`OtelWebSocket.Server`**: if the client offer’s first token is `otel-ws`, the wrapper strips it and calls `userHandleProtocols` on the rest; the HTTP response uses the **bare** selected subprotocol `S` from that rest list (RFC-compliant). If the rest is empty, the server answers `otel-ws` and does not call the user handler.
-- **Envelope** (`isOtelActive`): `OtelWebSocket` enables it on every successful `open`. `OtelWebSocket.Server` enables it per socket when the **first** token of `Sec-WebSocket-Protocol` on the upgrade request is `otel-ws` (even if the negotiated subprotocol is a bare `Pi`). Server-side activation reads the negotiated subprotocol via `_protocol` when present, otherwise the public `protocol` getter.
+- **`OtelWebSocket.Server`**: if the client offer’s first token is bare `otel-ws`, the wrapper filters out all `otel-ws` and `otel-ws+*` tokens, then calls `userHandleProtocols` with the remaining bare user protocols. The server responds with `otel-ws+<selected>` to signal otel-ws awareness. If no user protocols remain after filtering (e.g. client offered only `otel-ws`), the ws package rejects the handshake naturally — no explicit guard needed.
+- **Envelope** (`isOtelActive`): `OtelWebSocket` enables it when the negotiated wire protocol is bare `otel-ws` or starts with `otel-ws+` (i.e. when the server acknowledged otel-ws awareness). `OtelWebSocket.Server` enables it per socket when the **first** token of `Sec-WebSocket-Protocol` on the upgrade request is `otel-ws`.
 - **User-facing `protocol`**: strip an `otel-ws+` prefix (8 chars) for display; map negotiated `otel-ws` alone to `''`.
 - **RxJS**: `WebSocketSubjectConfig` includes optional `prependOtelSubprotocol` (default `true`). Set `false` to connect without offering `otel-ws` (e.g. native server that only negotiates `json`).
 
