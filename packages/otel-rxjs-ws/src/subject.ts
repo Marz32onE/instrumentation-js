@@ -36,11 +36,17 @@ function normalizeUserProtocols(protocols?: string | string[]): string[] {
   return arr.filter((p): p is string => typeof p === 'string' && p.length > 0 && p !== OTEL_WS_PROTOCOL);
 }
 
-/** Offer: compound `otel-ws+P` tokens first, then bare user protocols. No bare `otel-ws` sentinel when user protocols exist. */
-function buildClientProtocolOffer(protocols?: string | string[]): string[] {
+/** Offer: compound `otel-ws+P` tokens first, then bare user protocols.
+ * - No protocol config (undefined) → default offer of bare `otel-ws` sentinel (enables trace by default).
+ * - Explicitly empty protocol (`''` or `[]`) → empty offer, passthrough mode (no otel-ws injection).
+ */
+function buildClientProtocolOffer(protocols: string | string[] | undefined): string[] {
+  if (protocols === undefined) {
+    return [OTEL_WS_PROTOCOL];
+  }
   const user = [...new Set(normalizeUserProtocols(protocols))];
   return user.length === 0
-    ? [OTEL_WS_PROTOCOL]
+    ? []
     : [...user.map(p => `${OTEL_WS_INSTRUMENTED_PREFIX}${p}`), ...user];
 }
 
@@ -65,19 +71,6 @@ function clientEnvelopeActive(wire: string): boolean {
   );
 }
 
-const EMPTY_USER_SUBPROTOCOL_ERROR =
-  'OtelWebSocket: at least one non-empty user subprotocol is required when protocols are specified.';
-
-function assertNonEmptyUserSubprotocolWhenSpecified(
-  prepend: boolean,
-  protocolField: string | string[] | undefined,
-): void {
-  if (!prepend || protocolField === undefined) return;
-  const user = [...new Set(normalizeUserProtocols(protocolField))];
-  if (user.length === 0) {
-    throw new Error(EMPTY_USER_SUBPROTOCOL_ERROR);
-  }
-}
 
 function defaultSerializer<T>(value: T): string {
   return JSON.stringify(value);
@@ -124,8 +117,6 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
     } = configIn;
 
     const prepend = prependOtelSubprotocol !== false;
-
-    assertNonEmptyUserSubprotocolWhenSpecified(prepend, configIn.protocol);
 
     const userOpenObserver = configIn.openObserver;
     const userCloseObserver = configIn.closingObserver;

@@ -155,15 +155,11 @@ export class OtelWebSocket extends BaseWebSocket {
         typeof p === "string" && p.length > 0 && p !== OTEL_WS_PROTOCOL,
     );
     const user = [...new Set(normalized)];
-    if (protocols !== undefined && user.length === 0) {
-      throw new Error(
-        "OtelWebSocket: at least one non-empty user subprotocol is required when protocols are specified.",
-      );
-    }
-
+    // No user subprotocols -> keep a plain ws handshake (no implicit otel-ws offer).
+    // This preserves compatibility for endpoints that intentionally use empty protocol negotiation.
     const offer =
       user.length === 0
-        ? [OTEL_WS_PROTOCOL]
+        ? []
         : [...user.map(p => `${OTEL_WS_INSTRUMENTED_PREFIX}${p}`), ...user];
     super(address, offer, options);
     (this as WsRecord)[USER_PROTO_LIST_SYMBOL] = user;
@@ -501,15 +497,20 @@ function patchNativeSend(
         SpanKind.PRODUCER,
         activeCtx,
       );
-      if (typeof optionsOrCb === "function" || optionsOrCb === undefined) {
-        originalSend(data as never, (sendErr?: Error) =>
-          finishSendSpan(span, sendErr, cb),
-        );
-      } else {
-        originalSend(data as never, optionsOrCb as never, (sendErr?: Error) =>
-          finishSendSpan(span, sendErr, cb),
-        );
-      }
+      // Set SKIP_FRAME_INJECT_KEY so patchNativeSendFrame does not create a duplicate span
+      // for this passthrough send (mirrors the active-path behaviour at line 520).
+      const skipCtx = activeCtx.setValue(SKIP_FRAME_INJECT_KEY, true);
+      otelContext.with(skipCtx, () => {
+        if (typeof optionsOrCb === "function" || optionsOrCb === undefined) {
+          originalSend(data as never, (sendErr?: Error) =>
+            finishSendSpan(span, sendErr, cb),
+          );
+        } else {
+          originalSend(data as never, optionsOrCb as never, (sendErr?: Error) =>
+            finishSendSpan(span, sendErr, cb),
+          );
+        }
+      });
       return;
     }
 
@@ -564,6 +565,10 @@ function patchNativeSendFrame(
   ) => {
     // Skip if this frame was already instrumented by patchNativeSend.
     if (otelContext.active().getValue(SKIP_FRAME_INJECT_KEY)) {
+      return originalSendFrame(list, cb);
+    }
+    // Skip control frames (close=0x8, ping=0x9, pong=0xa) — not user message sends.
+    if (list.length > 0 && list[0].length >= 1 && (list[0][0] & 0x0f) >= 0x8) {
       return originalSendFrame(list, cb);
     }
 

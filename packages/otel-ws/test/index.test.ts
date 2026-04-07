@@ -27,6 +27,8 @@ function createNegotiatingServer(): WsPkg.Server {
     port: 0,
     handleProtocols: (protocols) => {
       const list = [...(protocols as Iterable<string>)];
+      const prefixed = list.find((p) => p.startsWith(`${OTEL_WS_PROTOCOL}+`));
+      if (prefixed) return prefixed;
       return list.includes(OTEL_WS_PROTOCOL) ? OTEL_WS_PROTOCOL : false;
     },
   });
@@ -79,7 +81,7 @@ describe('otel-ws', () => {
     const port = (wss.address() as AddressInfo).port;
 
     const client = await new Promise<WebSocket>((resolve, reject) => {
-      const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+      const ws = new WebSocket(`ws://127.0.0.1:${port}`, 'json');
       ws.once('open', () => resolve(ws));
       ws.once('error', reject);
     });
@@ -119,7 +121,7 @@ describe('otel-ws', () => {
     });
     const port = (wss.address() as AddressInfo).port;
     const received = await new Promise<{ traceId: string | undefined; data: unknown }>((resolve) => {
-      const client = new WebSocket(`ws://127.0.0.1:${port}`);
+      const client = new WebSocket(`ws://127.0.0.1:${port}`, 'json');
       client.on('message', (data) => {
         resolve({
           traceId: trace.getSpanContext(context.active())?.traceId,
@@ -150,7 +152,7 @@ describe('otel-ws', () => {
     });
     const port = (wss.address() as AddressInfo).port;
     const socket = await new Promise<WebSocket>((resolve, reject) => {
-      const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+      const ws = new WebSocket(`ws://127.0.0.1:${port}`, 'json');
       ws.once('open', () => resolve(ws));
       ws.once('error', reject);
     });
@@ -225,7 +227,7 @@ describe('otel-ws', () => {
       });
     });
     const port = (wss.address() as AddressInfo).port;
-    const raw = new WebSocket(`ws://127.0.0.1:${port}`);
+    const raw = new WebSocket(`ws://127.0.0.1:${port}`, 'json');
     await new Promise<void>((resolve) => raw.once('open', () => resolve()));
 
     const tracer = provider.getTracer('test-native-frame');
@@ -401,7 +403,7 @@ describe('otel-ws', () => {
   });
 
   it('delivers non-envelope message as-is without crashing (legacy / non-instrumented client)', async () => {
-    const wss = new WsPkg.Server({ port: 0 });
+    const wss = createNegotiatingServer();
     wss.on('connection', (ws) => {
       setTimeout(() => {
         // Legacy flat format — not an envelope
@@ -411,7 +413,7 @@ describe('otel-ws', () => {
     const port = (wss.address() as AddressInfo).port;
 
     const received = await new Promise<{ data: unknown; traceId: string | undefined }>((resolve) => {
-      const client = new WebSocket(`ws://127.0.0.1:${port}`);
+      const client = new WebSocket(`ws://127.0.0.1:${port}`, 'json');
       client.on('message', (data) => {
         resolve({
           data,
@@ -420,7 +422,7 @@ describe('otel-ws', () => {
       });
     });
 
-    // Data delivered as-is (the raw parsed object)
+    // Data delivered as-is (legacy payload parsed into object)
     expect((received.data as Record<string, unknown>).body).toBe('legacy');
     // The receive span creates its own root trace — the legacy traceparent is NOT extracted
     expect(received.traceId).not.toBe('12345678901234567890123456789012');
@@ -784,43 +786,70 @@ describe('otel-ws', () => {
       await new Promise<void>((r) => wss.close(() => r()));
     });
 
-    it('Case E: new OtelWebSocket(url, "") → throws error (protocols specified but empty)', async () => {
-      // After fix: if caller explicitly passes a protocol value that resolves to no valid user subprotocols,
-      // the constructor throws synchronously before any connection is attempted.
+    it('Case E: OtelWebSocket without user sub-protocol connects successfully and stays passthrough', async () => {
+      // New spec: no user sub-protocol on client side should not reject connection.
+      // It should run in passthrough mode (no envelope), while still emitting send/receive spans.
       const wss = new WsPkg.Server({ port: 0 });
+      wss.on('connection', (ws) => {
+        ws.on('message', (data) => ws.send(data.toString()));
+      });
       const port = (wss.address() as AddressInfo).port;
 
-      expect(() => new WebSocket(`ws://127.0.0.1:${port}`, '')).toThrow(
-        'OtelWebSocket: at least one non-empty user subprotocol is required when protocols are specified.',
-      );
-
-      // new WebSocket(url) with NO protocols argument is still allowed (no explicit spec → offers otel-ws only)
-      const openedWithoutProtocol = await new Promise<boolean>((resolve) => {
-        const ws = new WebSocket(`ws://127.0.0.1:${port}`);
-        ws.once('open', () => { resolve(true); ws.close(); });
-        ws.once('error', () => resolve(false));
+      const received = await new Promise<string>((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}`, '');
+        ws.once('open', () => {
+          expect(ws.protocol).toBe('');
+          ws.send('raw-no-protocol');
+        });
+        ws.once('message', (data) => {
+          resolve(data as string);
+          ws.close();
+        });
+        ws.once('error', reject);
       });
-      expect(openedWithoutProtocol).toBe(true);
+      expect(received).toBe('raw-no-protocol');
+
+      const spans = exporter.getFinishedSpans();
+      const sendSpans = spans.filter((s) => s.name === 'websocket.send');
+      const receiveSpans = spans.filter((s) => s.name === 'websocket.receive');
+      expect(sendSpans).toHaveLength(1);
+      expect(receiveSpans).toHaveLength(1);
 
       await new Promise<void>((r) => wss.close(() => r()));
     });
 
     // ── Section 3: WebSocket.Server behaviour ─────────────────────────────
 
-    it('Case F: ws client offers only "otel-ws" → WebSocket.Server → connection rejected', async () => {
-      // After fix: when client offers ["otel-ws"] with no user subprotocol (rest.length === 0),
-      // WebSocket.Server returns false → handshake rejected.
-      const wss = new WebSocket.Server({
-        port: 0,
-        handleProtocols: () => 'json', // user handler would accept, but never reached when rest is empty
+    it('Case F: plain ws client without sub-protocol → OtelWebSocket.Server connects with passthrough', async () => {
+      // New spec: when client sends no sub-protocol, otel server must not reject.
+      // Connection should stay passthrough (raw payload), while server still emits send/receive spans.
+      let serverReceived: string | undefined;
+      const wss = new WebSocket.Server({ port: 0 });
+      wss.on('connection', (ws) => {
+        ws.on('message', (data) => {
+          serverReceived = data.toString();
+          ws.send('server-raw-ack');
+        });
       });
       const port = (wss.address() as AddressInfo).port;
 
-      await new Promise<void>((resolve, reject) => {
-        const c = new WsPkg(`ws://127.0.0.1:${port}`, [OTEL_WS_PROTOCOL]);
-        c.once('open', () => reject(new Error('expected rejection')));
-        c.once('error', () => resolve());
+      const clientReceived = await new Promise<string>((resolve, reject) => {
+        const c = new WsPkg(`ws://127.0.0.1:${port}`);
+        c.once('open', () => c.send('client-raw-msg'));
+        c.once('message', (data: WsPkg.Data) => {
+          resolve(Buffer.isBuffer(data) ? data.toString() : String(data));
+          c.close();
+        });
+        c.once('error', reject);
       });
+
+      expect(serverReceived).toBe('client-raw-msg');
+      expect(clientReceived).toBe('server-raw-ack');
+      const spans = exporter.getFinishedSpans();
+      const sendSpans = spans.filter((s) => s.name === 'websocket.send');
+      const receiveSpans = spans.filter((s) => s.name === 'websocket.receive');
+      expect(sendSpans).toHaveLength(1);
+      expect(receiveSpans).toHaveLength(1);
 
       await new Promise<void>((r) => wss.close(() => r()));
     });

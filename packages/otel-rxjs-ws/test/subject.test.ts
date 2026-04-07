@@ -269,25 +269,38 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
       await new Promise<void>((resolve) => wss.close(() => resolve()));
     });
 
-    it('Case E: explicit empty protocol throws (matches OtelWebSocket)', () => {
-      expect(() =>
-        webSocket({
-          url: 'ws://127.0.0.1:1',
-          WebSocketCtor: WS_CTOR,
-          protocol: '',
-        }),
-      ).toThrow(
-        'OtelWebSocket: at least one non-empty user subprotocol is required when protocols are specified.',
-      );
-      expect(() =>
-        webSocket({
-          url: 'ws://127.0.0.1:1',
-          WebSocketCtor: WS_CTOR,
-          protocol: [],
-        }),
-      ).toThrow(
-        'OtelWebSocket: at least one non-empty user subprotocol is required when protocols are specified.',
-      );
+    it('Case E: explicit empty protocol → passthrough mode, no throw, send/receive spans still created', async () => {
+      // New spec: when user provides empty protocol, no otel-ws is injected.
+      // Connection should succeed in passthrough mode (no envelope), spans still created.
+      const wss = new WebSocketServer({ port: 0 });
+      wss.on('connection', (ws) => {
+        ws.on('message', (data) => ws.send(data.toString()));
+      });
+      const port = (wss.address() as AddressInfo).port;
+
+      const ws = webSocket<string>({
+        url: `ws://127.0.0.1:${port}`,
+        WebSocketCtor: WS_CTOR,
+        protocol: '',
+      });
+
+      const msgPromise = firstValueFrom(ws.pipe(timeout(TEST_TIMEOUT)));
+      const sub = ws.subscribe();
+      ws.next('passthrough-msg');
+      const received = await msgPromise;
+
+      // raw message passes through without envelope
+      expect(received).toBe('passthrough-msg');
+
+      const spans = exporter.getFinishedSpans();
+      const sendSpans = spans.filter((s) => s.name === 'websocket.send');
+      const receiveSpans = spans.filter((s) => s.name === 'websocket.receive');
+      expect(sendSpans).toHaveLength(1);
+      expect(receiveSpans).toHaveLength(1);
+
+      sub.unsubscribe();
+      ws.complete();
+      await new Promise<void>((r) => wss.close(() => r()));
     });
   });
 

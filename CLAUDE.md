@@ -38,11 +38,21 @@ NODE_OPTIONS=--experimental-vm-modules npx jest test/index.test.ts
 
 ## Wire Protocol (otel-ws / otel-rxjs-ws)
 
-- **Client offer**: first subprotocol token is always `otel-ws`, followed by optional bare user subprotocols `P1, P2, …` (no `otel-ws+P` encoding). `json` is **not** auto-inserted.
-- **`OtelWebSocket.Server`**: if the client offer’s first token is bare `otel-ws`, the wrapper filters out all `otel-ws` and `otel-ws+*` tokens, then calls `userHandleProtocols` with the remaining bare user protocols. The server responds with `otel-ws+<selected>` to signal otel-ws awareness. If no user protocols remain after filtering (e.g. client offered only `otel-ws`), the ws package rejects the handshake naturally — no explicit guard needed.
+### Client offer
+
+| Scenario | otel-ws (`OtelWebSocket`) | otel-rxjs-ws (`webSocket()`) |
+|---|---|---|
+| No user protocols | `[]` — plain handshake, passthrough mode | `[‘otel-ws’]` — default trace-enabled offer |
+| Explicit empty protocol (`’’` / `[]`) | `[]` — passthrough mode | `[]` — passthrough mode (no throw) |
+| With user protocols (`’json’`) | `[‘otel-ws+json’, ‘json’]` | `[‘otel-ws+json’, ‘json’]` |
+
+**Passthrough mode** (no otel-ws offer / server does not return otel-ws prefix): connection succeeds, payloads pass through unchanged, but `websocket.send` and `websocket.receive` spans are **still created**.
+
+- **`OtelWebSocket.Server`**: if the client offer’s first token is bare `otel-ws`, the wrapper filters out all `otel-ws` and `otel-ws+*` tokens, then calls `userHandleProtocols` with the remaining bare user protocols. The server responds with `otel-ws+<selected>` to signal otel-ws awareness. If no user protocols remain after filtering (e.g. client offered only `otel-ws`), the ws package rejects the handshake naturally — no explicit guard needed. If the client offers **no** subprotocols at all, the server accepts the connection in passthrough mode (no envelope, spans still created).
 - **Envelope** (`isOtelActive`): `OtelWebSocket` enables it when the negotiated wire protocol is bare `otel-ws` or starts with `otel-ws+` (i.e. when the server acknowledged otel-ws awareness). `OtelWebSocket.Server` enables it per socket when the **first** token of `Sec-WebSocket-Protocol` on the upgrade request is `otel-ws`.
-- **User-facing `protocol`**: strip an `otel-ws+` prefix (8 chars) for display; map negotiated `otel-ws` alone to `''`.
-- **RxJS**: `WebSocketSubjectConfig` includes optional `prependOtelSubprotocol` (default `true`). Set `false` to connect without offering `otel-ws` (e.g. native server that only negotiates `json`).
+- **User-facing `protocol`**: strip an `otel-ws+` prefix (8 chars) for display; map negotiated `otel-ws` alone to `’’`.
+- **RxJS `prependOtelSubprotocol`**: set `false` to connect without offering `otel-ws` at all (e.g. legacy server that only negotiates `json`). When protocols are explicitly specified as empty, passthrough mode is used automatically (no `prependOtelSubprotocol: false` needed).
+- **`patchNativeSendFrame` skip rules** (otel-ws only): control frames (opcode ≥ 0x8: close/ping/pong) are always forwarded without a span; frames already instrumented by `patchNativeSend` are skipped via `SKIP_FRAME_INJECT_KEY`.
 
 Envelope format when active:
 
@@ -50,7 +60,7 @@ Envelope format when active:
 { "header": { "traceparent": "...", "tracestate": "..." }, "data": <user payload> }
 ```
 
-When inactive: payloads pass through unchanged (spans may still be created).
+When inactive: payloads pass through unchanged, spans are still created.
 
 ## Architecture
 
