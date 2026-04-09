@@ -13,7 +13,9 @@ import { Subscriber, Subscription } from 'rxjs';
 import { WebSocketSubject } from 'rxjs/webSocket';
 import type { WebSocketSubjectConfig as RxWebSocketSubjectConfig } from 'rxjs/webSocket';
 
-/** RxJS config plus optional `prependOtelSubprotocol` (default true). */
+/** RxJS config plus optional `prependOtelSubprotocol` (default true).
+ * When enabled, otel-ws tokens are prepended only if user protocols are provided.
+ */
 export type WebSocketSubjectConfig<T = unknown> = RxWebSocketSubjectConfig<T> & {
   prependOtelSubprotocol?: boolean;
 };
@@ -37,13 +39,10 @@ function normalizeUserProtocols(protocols?: string | string[]): string[] {
 }
 
 /** Offer: compound `otel-ws+P` tokens first, then bare user protocols.
- * - No protocol config (undefined) → default offer of bare `otel-ws` sentinel (enables trace by default).
+ * - No protocol config (undefined) → empty offer, plain ws handshake (passthrough mode).
  * - Explicitly empty protocol (`''` or `[]`) → empty offer, passthrough mode (no otel-ws injection).
  */
 function buildClientProtocolOffer(protocols: string | string[] | undefined): string[] {
-  if (protocols === undefined) {
-    return [OTEL_WS_PROTOCOL];
-  }
   const user = [...new Set(normalizeUserProtocols(protocols))];
   return user.length === 0
     ? []
@@ -122,7 +121,7 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
     const userCloseObserver = configIn.closingObserver;
     const merged: WebSocketSubjectConfig<T> = {
       ...rest,
-      protocol: prepend
+      protocol: prepend   
         ? buildClientProtocolOffer(configIn.protocol)
         : configIn.protocol,
       openObserver: {
