@@ -6,7 +6,7 @@ install:
 
 # Build publishable packages
 build:
-	npm run build -w packages/otel-ws -w packages/otel-rxjs-ws
+	npm run build -w packages/otel-ws -w packages/otel-rxjs-ws -w packages/otel-nats
 
 # Run all tests
 test:

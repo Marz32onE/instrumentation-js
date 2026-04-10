@@ -3,7 +3,8 @@
   "private": true,
   "workspaces": [
     "packages/otel-ws",
-    "packages/otel-rxjs-ws"
+    "packages/otel-rxjs-ws",
+    "packages/otel-nats"
   ],
   "scripts": {
     "build": "npm run build --workspaces",
