@@ -9,14 +9,14 @@
   "scripts": {
     "build": "npm run build --workspaces",
     "test": "npm run test --workspaces",
-    "lint:typecheck": "npm run lint --workspaces",
-    "lint:eslint": "eslint packages",
-    "lint": "npm run lint:typecheck && npm run lint:eslint",
-    "eslint": "eslint packages"
+    "lint": "npm run lint:types && npm run lint:eslint",
+    "lint:types": "npm run lint --workspaces --if-present",
+    "lint:eslint": "eslint \"packages/*/src/**/*.ts\" \"packages/*/test/**/*.ts\" --max-warnings 0"
   },
   "devDependencies": {
-    "@eslint/js": "^9.17.0",
-    "eslint": "^9.17.0",
-    "typescript-eslint": "^8.18.0"
+    "@eslint/js": "^9.21.0",
+    "eslint": "^9.21.0",
+    "globals": "^15.15.0",
+    "typescript-eslint": "^8.25.0"
   }
 }

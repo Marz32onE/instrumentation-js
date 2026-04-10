@@ -3,8 +3,32 @@ name: CI
 on:
   push:
     branches: [main]
+    paths:
+      - 'packages/**/*.ts'
+      - 'packages/**/*.tsx'
+      - 'packages/**/*.js'
+      - 'packages/**/*.mjs'
+      - 'packages/**/*.cjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'eslint.config.*'
+      - 'tsconfig*.json'
+      - 'Makefile'
+      - '.github/workflows/**'
   pull_request:
     branches: [main]
+    paths:
+      - 'packages/**/*.ts'
+      - 'packages/**/*.tsx'
+      - 'packages/**/*.js'
+      - 'packages/**/*.mjs'
+      - 'packages/**/*.cjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'eslint.config.*'
+      - 'tsconfig*.json'
+      - 'Makefile'
+      - '.github/workflows/**'
 
 jobs:
   lint:

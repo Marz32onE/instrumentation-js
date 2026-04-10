@@ -13,6 +13,10 @@ export interface NatsHdrs {
 /**
  * OTel TextMapGetter for nats.MsgHdrs.
  * Usage: propagation.extract(ctx, msg.headers, natsHeaderGetter)
+ *
+ * Assumes `MsgHdrs.get()` returns `""` for absent keys (nats.js v2 and v3
+ * `MsgHdrsImpl` behaviour). Maps empty string to `undefined` so the OTel
+ * propagator treats it as "header not present".
  */
 export const natsHeaderGetter: TextMapGetter<NatsHdrs> = {
   get(carrier: NatsHdrs, key: string): string | undefined {

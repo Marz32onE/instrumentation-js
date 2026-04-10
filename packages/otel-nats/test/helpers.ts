@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
+import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as os from 'node:os';
+import * as path from 'node:path';
 import {
   CompositePropagator,
   W3CBaggagePropagator,
@@ -20,7 +22,7 @@ import { context, propagation, trace } from '@opentelemetry/api';
 export function setupOTel(): {
   exporter: InMemorySpanExporter;
   provider: NodeTracerProvider;
-  teardown: () => void;
+  teardown: () => Promise<void>;
 } {
   const exporter = new InMemorySpanExporter();
   const provider = new NodeTracerProvider({
@@ -34,10 +36,9 @@ export function setupOTel(): {
   return {
     exporter,
     provider,
-    teardown(): void {
+    async teardown(): Promise<void> {
       exporter.reset();
-      void provider.shutdown();
-      // Reset globals so the next test can register a fresh provider
+      await provider.shutdown();
       trace.disable();
       propagation.disable();
       context.disable();
@@ -119,6 +120,100 @@ export async function startNatsServer(
 
     setTimeout(() => {
       if (!resolved) reject(new Error('nats-server startup timeout (10s)'));
+    }, 10_000);
+  });
+}
+
+/**
+ * Starts nats-server with TCP and WebSocket listeners (no TLS on WebSocket).
+ * Requires `nats-server` in PATH.
+ *
+ * Override with `NATS_URL` (tcp, e.g. nats://127.0.0.1:4222) and `NATS_WS_URL`
+ * (e.g. ws://127.0.0.1:9222) to use an existing server instead of spawning.
+ */
+export async function startNatsServerWithWebSocket(): Promise<{
+  tcpUrl: string;
+  wsUrl: string;
+  stop: () => Promise<void>;
+}> {
+  const externalTcp = process.env['NATS_URL'];
+  const externalWs = process.env['NATS_WS_URL'];
+  if (externalTcp && externalWs) {
+    return { tcpUrl: externalTcp, wsUrl: externalWs, stop: async () => {} };
+  }
+
+  const tcpPort = await getFreePort();
+  const wsPort = await getFreePort();
+  const cfgPath = path.join(os.tmpdir(), `nats-ws-${tcpPort}-${wsPort}.conf`);
+  fs.writeFileSync(
+    cfgPath,
+    `port: ${tcpPort}
+websocket {
+  port: ${wsPort}
+  no_tls: true
+}
+`,
+    'utf8',
+  );
+
+  return new Promise((resolve, reject) => {
+    const proc = spawn('nats-server', ['-c', cfgPath], { stdio: 'pipe' });
+    let resolved = false;
+
+    const onData = (data: Buffer) => {
+      const line = data.toString();
+      if (line.includes('Server is ready') && !resolved) {
+        resolved = true;
+        resolve({
+          tcpUrl: `nats://127.0.0.1:${tcpPort}`,
+          wsUrl: `ws://127.0.0.1:${wsPort}`,
+          stop: () =>
+            new Promise<void>((res) => {
+              proc.stdout?.destroy();
+              proc.stderr?.destroy();
+              proc.kill('SIGTERM');
+              proc.once('exit', () => {
+                try {
+                  fs.unlinkSync(cfgPath);
+                } catch {
+                  // ignore
+                }
+                res();
+              });
+            }),
+        });
+      }
+    };
+
+    proc.stdout?.on('data', onData);
+    proc.stderr?.on('data', onData);
+
+    proc.once('error', (err: NodeJS.ErrnoException) => {
+      try {
+        fs.unlinkSync(cfgPath);
+      } catch {
+        // ignore
+      }
+      if (err.code === 'ENOENT') {
+        reject(
+          new Error(
+            'nats-server not found in PATH. Install with: brew install nats-server',
+          ),
+        );
+      } else {
+        reject(err);
+      }
+    });
+
+    setTimeout(() => {
+      if (!resolved) {
+        try {
+          fs.unlinkSync(cfgPath);
+        } catch {
+          // ignore
+        }
+        reject(new Error('nats-server (websocket) startup timeout (10s)'));
+      }
     }, 10_000);
   });
 }

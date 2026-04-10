@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from '@jest/globals';
 import { ROOT_CONTEXT, SpanKind, SpanStatusCode } from '@opentelemetry/api';
-import { StringCodec } from 'nats';
+import { jetstream, jetstreamManager } from '@nats-io/jetstream';
 import { connect } from '../src/index.js';
 import { createJetStream } from '../src/jetstream.js';
 import { setupOTel, startNatsServer } from './helpers.js';
 
-const sc = StringCodec();
+const enc = new TextEncoder();
 const STREAM = 'TEST_STREAM';
 const SUBJECT = 'test.js.>';
 
@@ -29,7 +29,7 @@ describe('JetStream', () => {
 
     // Reset stream before each test
     const nc = (await connect({ servers: serverUrl })).natsConn();
-    const jsm = await nc.jetstreamManager();
+    const jsm = await jetstreamManager(nc);
     try {
       await jsm.streams.delete(STREAM);
     } catch {
@@ -40,7 +40,7 @@ describe('JetStream', () => {
   });
 
   afterEach(async () => {
-    otel.teardown();
+    await otel.teardown();
   });
 
   // ---------------------------------------------------------------------------
@@ -51,13 +51,13 @@ describe('JetStream', () => {
     const conn = await connect({ servers: serverUrl });
     const js = createJetStream(conn);
 
-    const ack = await js.publish(ROOT_CONTEXT, 'test.js.pub', sc.encode('hello'));
+    const ack = await js.publish(ROOT_CONTEXT, 'test.js.pub', enc.encode('hello'));
     await conn.drain();
 
     expect(ack.seq).toBeGreaterThan(0);
 
     const spans = otel.exporter.getFinishedSpans();
-    const span = spans.find((s) => s.name === 'send test.js.pub');
+    const span = spans.find((s) => s.name === 'test.js.pub send');
     expect(span).toBeDefined();
     expect(span?.kind).toBe(SpanKind.PRODUCER);
     expect(span?.attributes['messaging.system']).toBe('nats');
@@ -70,15 +70,15 @@ describe('JetStream', () => {
     const conn = await connect({ servers: serverUrl });
     const js = createJetStream(conn);
 
-    await js.publish(ROOT_CONTEXT, 'test.js.headers', sc.encode('data'));
+    await js.publish(ROOT_CONTEXT, 'test.js.headers', enc.encode('data'));
 
     // Read back via raw consumer to inspect headers
-    const jsm = await conn.natsConn().jetstreamManager();
+    const jsm = await jetstreamManager(conn.natsConn());
     await jsm.consumers.add(STREAM, {
       durable_name: 'header-check',
       filter_subject: 'test.js.headers',
     });
-    const rawJs = conn.natsConn().jetstream();
+    const rawJs = jetstream(conn.natsConn());
     const consumer = await rawJs.consumers.get(STREAM, 'header-check');
     const msgs = await consumer.fetch({ max_messages: 1 });
     let traceparent: string | undefined;
@@ -101,13 +101,13 @@ describe('JetStream', () => {
     const conn = await connect({ servers: serverUrl });
     const js = createJetStream(conn);
 
-    const jsm = await conn.natsConn().jetstreamManager();
+    const jsm = await jetstreamManager(conn.natsConn());
     await jsm.consumers.add(STREAM, {
       durable_name: 'msg-link',
       filter_subject: 'test.js.msglink',
     });
 
-    await js.publish(ROOT_CONTEXT, 'test.js.msglink', sc.encode('payload'));
+    await js.publish(ROOT_CONTEXT, 'test.js.msglink', enc.encode('payload'));
 
     const consumer = await js.consumer(STREAM, 'msg-link');
     const gen = consumer.messages();
@@ -120,8 +120,8 @@ describe('JetStream', () => {
     await conn.drain();
 
     const spans = otel.exporter.getFinishedSpans();
-    const producerSpan = spans.find((s) => s.name === 'send test.js.msglink');
-    const consumerSpan = spans.find((s) => s.name === 'receive test.js.msglink');
+    const producerSpan = spans.find((s) => s.name === 'test.js.msglink send');
+    const consumerSpan = spans.find((s) => s.name === 'test.js.msglink receive');
 
     expect(producerSpan).toBeDefined();
     expect(consumerSpan).toBeDefined();
@@ -137,14 +137,14 @@ describe('JetStream', () => {
     const conn = await connect({ servers: serverUrl });
     const js = createJetStream(conn);
 
-    const jsm = await conn.natsConn().jetstreamManager();
+    const jsm = await jetstreamManager(conn.natsConn());
     await jsm.consumers.add(STREAM, {
       durable_name: 'msg-lifecycle',
       filter_subject: 'test.js.lifecycle',
     });
 
-    await js.publish(ROOT_CONTEXT, 'test.js.lifecycle', sc.encode('a'));
-    await js.publish(ROOT_CONTEXT, 'test.js.lifecycle', sc.encode('b'));
+    await js.publish(ROOT_CONTEXT, 'test.js.lifecycle', enc.encode('a'));
+    await js.publish(ROOT_CONTEXT, 'test.js.lifecycle', enc.encode('b'));
 
     const consumer = await js.consumer(STREAM, 'msg-lifecycle');
     const gen = consumer.messages();
@@ -160,7 +160,7 @@ describe('JetStream', () => {
 
     const consumerSpans = otel.exporter
       .getFinishedSpans()
-      .filter((s) => s.name === 'receive test.js.lifecycle');
+      .filter((s) => s.name === 'test.js.lifecycle receive');
 
     expect(consumerSpans).toHaveLength(2);
     for (const s of consumerSpans) {
@@ -177,15 +177,15 @@ describe('JetStream', () => {
     const conn = await connect({ servers: serverUrl });
     const js = createJetStream(conn);
 
-    const jsm = await conn.natsConn().jetstreamManager();
+    const jsm = await jetstreamManager(conn.natsConn());
     await jsm.consumers.add(STREAM, {
       durable_name: 'fetch-test',
       filter_subject: 'test.js.fetch',
     });
 
-    await js.publish(ROOT_CONTEXT, 'test.js.fetch', sc.encode('x1'));
-    await js.publish(ROOT_CONTEXT, 'test.js.fetch', sc.encode('x2'));
-    await js.publish(ROOT_CONTEXT, 'test.js.fetch', sc.encode('x3'));
+    await js.publish(ROOT_CONTEXT, 'test.js.fetch', enc.encode('x1'));
+    await js.publish(ROOT_CONTEXT, 'test.js.fetch', enc.encode('x2'));
+    await js.publish(ROOT_CONTEXT, 'test.js.fetch', enc.encode('x3'));
 
     const consumer = await js.consumer(STREAM, 'fetch-test');
     const results = await consumer.fetch(3);
@@ -200,7 +200,7 @@ describe('JetStream', () => {
 
     const consumerSpans = otel.exporter
       .getFinishedSpans()
-      .filter((s) => s.name === 'receive test.js.fetch');
+      .filter((s) => s.name === 'test.js.fetch receive');
     expect(consumerSpans).toHaveLength(3);
 
     for (const s of consumerSpans) {
@@ -213,13 +213,13 @@ describe('JetStream', () => {
     const conn = await connect({ servers: serverUrl });
     const js = createJetStream(conn);
 
-    const jsm = await conn.natsConn().jetstreamManager();
+    const jsm = await jetstreamManager(conn.natsConn());
     await jsm.consumers.add(STREAM, {
       durable_name: 'fetch-link',
       filter_subject: 'test.js.fetchlink',
     });
 
-    await js.publish(ROOT_CONTEXT, 'test.js.fetchlink', sc.encode('msg'));
+    await js.publish(ROOT_CONTEXT, 'test.js.fetchlink', enc.encode('msg'));
 
     const consumer = await js.consumer(STREAM, 'fetch-link');
     const results = await consumer.fetch(1);
@@ -231,10 +231,10 @@ describe('JetStream', () => {
 
     const producerSpan = otel.exporter
       .getFinishedSpans()
-      .find((s) => s.name === 'send test.js.fetchlink');
+      .find((s) => s.name === 'test.js.fetchlink send');
     const consumerSpan = otel.exporter
       .getFinishedSpans()
-      .find((s) => s.name === 'receive test.js.fetchlink');
+      .find((s) => s.name === 'test.js.fetchlink receive');
 
     expect(consumerSpan?.links).toHaveLength(1);
     expect(consumerSpan?.links[0].context.traceId).toBe(

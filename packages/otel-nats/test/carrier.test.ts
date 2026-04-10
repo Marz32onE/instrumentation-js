@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { ROOT_CONTEXT, SpanKind, propagation, trace } from '@opentelemetry/api';
-import { headers } from 'nats';
+import { headers } from '@nats-io/nats-core';
 import type { NatsHdrs } from '../src/carrier.js';
 import { natsHeaderGetter, natsHeaderSetter } from '../src/carrier.js';
 import { setupOTel } from './helpers.js';
@@ -16,8 +16,8 @@ describe('carrier', () => {
     otel = setupOTel();
   });
 
-  afterEach(() => {
-    otel.teardown();
+  afterEach(async () => {
+    await otel.teardown();
   });
 
   it('inject writes traceparent into nats headers', () => {

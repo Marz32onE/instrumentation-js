@@ -10,4 +10,5 @@ module.exports = {
   },
   collectCoverageFrom: ['src/**/*.ts'],
   testTimeout: 15000,
+  forceExit: true,
 };

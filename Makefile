@@ -12,7 +12,7 @@ build:
 test:
 	npm run test --workspaces
 
-# Type-check (tsc --noEmit) + ESLint (see eslint.config.mjs)
+# Type-check (tsc --noEmit per workspace) + ESLint (see eslint.config.mjs)
 lint:
 	npm run lint
 

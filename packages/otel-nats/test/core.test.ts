@@ -1,19 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from '@jest/globals';
-import {
-  ROOT_CONTEXT,
-  SpanKind,
-  SpanStatusCode,
-  context as otelContext,
-  propagation,
-  trace,
-} from '@opentelemetry/api';
-import { StringCodec, headers } from 'nats';
+import { ROOT_CONTEXT, SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
 import { connect } from '../src/index.js';
-import type { NatsHdrs } from '../src/carrier.js';
-import { natsHeaderGetter } from '../src/carrier.js';
 import { setupOTel, startNatsServer, sleep } from './helpers.js';
 
-const sc = StringCodec();
+const enc = new TextEncoder();
+const dec = new TextDecoder();
 
 describe('Conn (core NATS)', () => {
   let serverUrl: string;
@@ -34,8 +25,8 @@ describe('Conn (core NATS)', () => {
     otel = setupOTel();
   });
 
-  afterEach(() => {
-    otel.teardown();
+  afterEach(async () => {
+    await otel.teardown();
   });
 
   // ---------------------------------------------------------------------------
@@ -48,13 +39,13 @@ describe('Conn (core NATS)', () => {
     // drain sub immediately so server doesn't buffer
     setTimeout(() => sub.unsubscribe(), 100);
 
-    await conn.publish(ROOT_CONTEXT, 'test.pub.attrs', sc.encode('hello'));
+    conn.publish(ROOT_CONTEXT, 'test.pub.attrs', enc.encode('hello'));
     await conn.drain();
 
     const spans = otel.exporter.getFinishedSpans();
     expect(spans).toHaveLength(1);
     const span = spans[0];
-    expect(span.name).toBe('send test.pub.attrs');
+    expect(span.name).toBe('test.pub.attrs send');
     expect(span.kind).toBe(SpanKind.PRODUCER);
     expect(span.attributes['messaging.system']).toBe('nats');
     expect(span.attributes['messaging.destination.name']).toBe('test.pub.attrs');
@@ -80,7 +71,7 @@ describe('Conn (core NATS)', () => {
     const tracer = otel.provider.getTracer('test');
     const parentSpan = tracer.startSpan('parent', {}, ROOT_CONTEXT);
     const parentCtx = trace.setSpan(ROOT_CONTEXT, parentSpan);
-    await conn.publish(parentCtx, 'test.pub.inject', sc.encode('hi'));
+    conn.publish(parentCtx, 'test.pub.inject', enc.encode('hi'));
     parentSpan.end();
 
     await done;
@@ -95,12 +86,12 @@ describe('Conn (core NATS)', () => {
     const conn = await connect({ servers: serverUrl });
     await conn.drain();
 
-    await expect(
-      conn.publish(ROOT_CONTEXT, 'test.pub.err', sc.encode('x')),
-    ).rejects.toThrow();
+    expect(() => {
+      conn.publish(ROOT_CONTEXT, 'test.pub.err', enc.encode('x'));
+    }).toThrow();
 
     const spans = otel.exporter.getFinishedSpans();
-    const pubSpan = spans.find((s) => s.name === 'send test.pub.err');
+    const pubSpan = spans.find((s) => s.name === 'test.pub.err send');
     expect(pubSpan).toBeDefined();
     expect(pubSpan?.status.code).toBe(SpanStatusCode.ERROR);
     expect(pubSpan?.events.some((e) => e.name === 'exception')).toBe(true);
@@ -124,13 +115,13 @@ describe('Conn (core NATS)', () => {
 
     await sleep(20);
     // publish with raw natsConn (no trace) to trigger consumer
-    conn.natsConn().publish('test.sub.attrs', sc.encode('world'));
+    conn.natsConn().publish('test.sub.attrs', enc.encode('world'));
 
     await consuming;
     await conn.drain();
 
     const spans = otel.exporter.getFinishedSpans();
-    const consumerSpan = spans.find((s) => s.name === 'process test.sub.attrs');
+    const consumerSpan = spans.find((s) => s.name === 'test.sub.attrs process');
     expect(consumerSpan).toBeDefined();
     expect(consumerSpan?.kind).toBe(SpanKind.CONSUMER);
     expect(consumerSpan?.attributes['messaging.system']).toBe('nats');
@@ -151,14 +142,14 @@ describe('Conn (core NATS)', () => {
     })();
 
     await sleep(20);
-    await conn.publish(ROOT_CONTEXT, 'test.sub.link', sc.encode('data'));
+    conn.publish(ROOT_CONTEXT, 'test.sub.link', enc.encode('data'));
 
     await consuming;
     await conn.drain();
 
     const spans = otel.exporter.getFinishedSpans();
-    const producerSpan = spans.find((s) => s.name === 'send test.sub.link');
-    const consumerSpan = spans.find((s) => s.name === 'process test.sub.link');
+    const producerSpan = spans.find((s) => s.name === 'test.sub.link send');
+    const consumerSpan = spans.find((s) => s.name === 'test.sub.link process');
 
     expect(producerSpan).toBeDefined();
     expect(consumerSpan).toBeDefined();
@@ -187,13 +178,13 @@ describe('Conn (core NATS)', () => {
 
     await sleep(20);
     // Publish without headers (no trace)
-    conn.natsConn().publish('test.sub.notrace', sc.encode('raw'));
+    conn.natsConn().publish('test.sub.notrace', enc.encode('raw'));
 
     await consuming;
     await conn.drain();
 
     const spans = otel.exporter.getFinishedSpans();
-    const consumerSpan = spans.find((s) => s.name === 'process test.sub.notrace');
+    const consumerSpan = spans.find((s) => s.name === 'test.sub.notrace process');
     expect(consumerSpan).toBeDefined();
     expect(consumerSpan?.links).toHaveLength(0);
   });
@@ -207,12 +198,12 @@ describe('Conn (core NATS)', () => {
     })();
 
     await sleep(20);
-    conn.natsConn().publish('test.sub.queue', sc.encode('q'));
+    conn.natsConn().publish('test.sub.queue', enc.encode('q'));
     await consuming;
     await conn.drain();
 
     const spans = otel.exporter.getFinishedSpans();
-    const consumerSpan = spans.find((s) => s.name === 'process test.sub.queue');
+    const consumerSpan = spans.find((s) => s.name === 'test.sub.queue process');
     expect(consumerSpan?.attributes['messaging.consumer.group.name']).toBe('workers');
   });
 
@@ -230,15 +221,15 @@ describe('Conn (core NATS)', () => {
     })();
 
     await sleep(20);
-    conn.natsConn().publish('test.sub.lifecycle', sc.encode('msg1'));
+    conn.natsConn().publish('test.sub.lifecycle', enc.encode('msg1'));
     await sleep(20);
-    conn.natsConn().publish('test.sub.lifecycle', sc.encode('msg2'));
+    conn.natsConn().publish('test.sub.lifecycle', enc.encode('msg2'));
 
     await consuming;
     await conn.drain();
 
     const spans = otel.exporter.getFinishedSpans().filter(
-      (s) => s.name === 'process test.sub.lifecycle',
+      (s) => s.name === 'test.sub.lifecycle process',
     );
     expect(spans).toHaveLength(2);
     for (const s of spans) {
@@ -259,19 +250,19 @@ describe('Conn (core NATS)', () => {
     const replier = conn.natsConn().subscribe('test.req.ok');
     const replierDone = (async () => {
       for await (const msg of replier) {
-        msg.respond(sc.encode('pong'));
+        msg.respond(enc.encode('pong'));
         break;
       }
     })();
 
-    const reply = await conn.request(ROOT_CONTEXT, 'test.req.ok', sc.encode('ping'));
+    const reply = await conn.request(ROOT_CONTEXT, 'test.req.ok', enc.encode('ping'));
     await replierDone;
     await conn.drain();
 
-    expect(sc.decode(reply.data)).toBe('pong');
+    expect(dec.decode(reply.data)).toBe('pong');
 
     const spans = otel.exporter.getFinishedSpans();
-    const reqSpan = spans.find((s) => s.name === 'send test.req.ok');
+    const reqSpan = spans.find((s) => s.name === 'test.req.ok send');
     expect(reqSpan).toBeDefined();
     expect(reqSpan?.kind).toBe(SpanKind.PRODUCER);
     expect(reqSpan?.status.code).toBe(SpanStatusCode.OK);
@@ -281,11 +272,11 @@ describe('Conn (core NATS)', () => {
     const conn = await connect({ servers: serverUrl });
 
     await expect(
-      conn.request(ROOT_CONTEXT, 'test.req.timeout', sc.encode('x'), { timeout: 200 }),
+      conn.request(ROOT_CONTEXT, 'test.req.timeout', enc.encode('x'), { timeout: 200 }),
     ).rejects.toThrow();
 
     const spans = otel.exporter.getFinishedSpans();
-    const reqSpan = spans.find((s) => s.name === 'send test.req.timeout');
+    const reqSpan = spans.find((s) => s.name === 'test.req.timeout send');
     expect(reqSpan?.status.code).toBe(SpanStatusCode.ERROR);
     expect(reqSpan?.events.some((e) => e.name === 'exception')).toBe(true);
 

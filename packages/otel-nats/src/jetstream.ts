@@ -7,18 +7,26 @@ import {
   isSpanContextValid,
   trace,
 } from '@opentelemetry/api';
-import type { ConsumeOptions, JetStreamClient, JsMsg, PubAck } from 'nats';
-import { headers } from 'nats';
+import { headers, type MsgHdrs } from '@nats-io/transport-node';
+import {
+  jetstream as natsJetStream,
+  type ConsumeOptions,
+  type Consumer,
+  type JetStreamClient,
+  type JsMsg,
+  type PubAck,
+} from '@nats-io/jetstream';
 
-import type { Conn } from './index.js';
+import type { OtelNatsConn } from './index.js';
 import { natsHeaderGetter, natsHeaderSetter } from './carrier.js';
 import { publishAttrs, receiveAttrs } from './attributes.js';
 
 /**
  * Create an instrumented JetStream client.
  * Mirrors Go version's oteljetstream.New().
+ * Uses {@link https://github.com/nats-io/nats.js | @nats-io/jetstream} (nats.js v3).
  */
-export function createJetStream(conn: Conn): JetStream {
+export function createJetStream(conn: OtelNatsConn): JetStream {
   return new JetStream(conn);
 }
 
@@ -27,30 +35,33 @@ export function createJetStream(conn: Conn): JetStream {
  * Mirrors Go version's oteljetstream.JetStream interface.
  */
 export class JetStream {
-  readonly #conn: Conn;
+  readonly #conn: OtelNatsConn;
   readonly #js: JetStreamClient;
 
-  constructor(conn: Conn) {
+  constructor(conn: OtelNatsConn) {
     this.#conn = conn;
-    this.#js = conn.natsConn().jetstream();
+    this.#js = natsJetStream(conn.natsConn());
   }
 
   /**
    * Publish with a PRODUCER span.
    * Span name: "send {subject}"
+   *
+   * If `opts.headers` is provided, `traceparent` / `tracestate` keys in it
+   * will be **overwritten** by the current span's trace context.
    */
   async publish(
     ctx: Context,
     subject: string,
     data?: Uint8Array,
-    opts?: { headers?: import('nats').MsgHdrs },
+    opts?: { headers?: MsgHdrs },
   ): Promise<PubAck> {
     const { tracer, propagator } = this.#conn.traceContext();
     const serverAddress = this.#conn.serverAddress();
     const bodySize = data?.length ?? 0;
 
     const span = tracer.startSpan(
-      `send ${subject}`,
+      `${subject} send`,
       {
         kind: SpanKind.PRODUCER,
         attributes: publishAttrs(subject, bodySize, serverAddress),
@@ -89,15 +100,11 @@ export class JetStream {
  * Mirrors Go version's Consumer interface (Consume / Messages / Fetch).
  */
 export class OtelConsumer {
-  readonly #conn: Conn;
-  readonly #raw: import('nats').Consumer;
+  readonly #conn: OtelNatsConn;
+  readonly #raw: Consumer;
   readonly #consumerName: string;
 
-  constructor(
-    conn: Conn,
-    raw: import('nats').Consumer,
-    consumerName: string,
-  ) {
+  constructor(conn: OtelNatsConn, raw: Consumer, consumerName: string) {
     this.#conn = conn;
     this.#raw = raw;
     this.#consumerName = consumerName;
@@ -133,7 +140,7 @@ export class OtelConsumer {
         const bodySize = msg.data?.length ?? 0;
 
         const span = tracer.startSpan(
-          `receive ${msg.subject}`,
+          `${msg.subject} receive`,
           {
             kind: SpanKind.CONSUMER,
             attributes: {
@@ -150,7 +157,7 @@ export class OtelConsumer {
       }
     } finally {
       if (lastSpan) lastSpan.end();
-      iter.close();
+      await iter.close();
     }
   }
 
@@ -168,29 +175,33 @@ export class OtelConsumer {
     const fetched = await this.#raw.fetch({ max_messages: maxMessages, ...opts });
     const result: Array<{ msg: JsMsg; ctx: Context }> = [];
 
-    for await (const msg of fetched) {
-      const hdrs = msg.headers;
-      const extractedCtx = hdrs
-        ? propagator.extract(otelContext.active(), hdrs, natsHeaderGetter)
-        : otelContext.active();
+    try {
+      for await (const msg of fetched) {
+        const hdrs = msg.headers;
+        const extractedCtx = hdrs
+          ? propagator.extract(otelContext.active(), hdrs, natsHeaderGetter)
+          : otelContext.active();
 
-      const originSpanCtx = trace.getSpanContext(extractedCtx);
-      const bodySize = msg.data?.length ?? 0;
+        const originSpanCtx = trace.getSpanContext(extractedCtx);
+        const bodySize = msg.data?.length ?? 0;
 
-      const span = tracer.startSpan(
-        `receive ${msg.subject}`,
-        {
-          kind: SpanKind.CONSUMER,
-          attributes: {
-            ...receiveAttrs(msg.subject, 'receive', bodySize, serverAddress),
-            'messaging.consumer.name': this.#consumerName,
+        const span = tracer.startSpan(
+          `${msg.subject} receive`,
+          {
+            kind: SpanKind.CONSUMER,
+            attributes: {
+              ...receiveAttrs(msg.subject, 'receive', bodySize, serverAddress),
+              'messaging.consumer.name': this.#consumerName,
+            },
+            links: originSpanCtx && isSpanContextValid(originSpanCtx) ? [{ context: originSpanCtx }] : [],
           },
-          links: originSpanCtx && isSpanContextValid(originSpanCtx) ? [{ context: originSpanCtx }] : [],
-        },
-        otelContext.active(),
-      );
-      span.end();
-      result.push({ msg, ctx: trace.setSpan(otelContext.active(), span) });
+          otelContext.active(),
+        );
+        span.end();
+        result.push({ msg, ctx: trace.setSpan(otelContext.active(), span) });
+      }
+    } finally {
+      await fetched.close();
     }
 
     return result;

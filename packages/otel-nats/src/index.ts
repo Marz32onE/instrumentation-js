@@ -6,8 +6,15 @@ import {
   isSpanContextValid,
   trace,
 } from '@opentelemetry/api';
-import type { ConnectionOptions, Msg, NatsConnection } from 'nats';
-import { connect as natsConnect, headers } from 'nats';
+import {
+  connect as natsConnect,
+  type Msg,
+  type MsgHdrs,
+  type NatsConnection,
+  type NodeConnectionOptions,
+  headers as natsHeaders,
+} from '@nats-io/transport-node';
+import type { ConnectionOptions as CoreConnectionOptions, WsConnectionOptions } from '@nats-io/nats-core';
 
 import { natsHeaderGetter, natsHeaderSetter } from './carrier.js';
 import { publishAttrs, receiveAttrs, SCOPE_NAME } from './attributes.js';
@@ -19,27 +26,64 @@ import {
 import { version } from './version.js';
 
 export type { NatsInstrumentationOptions };
+export type { NodeConnectionOptions };
 export { natsHeaderGetter, natsHeaderSetter } from './carrier.js';
+/** Core client connection options (from @nats-io/nats-core), for typing {@link wsconnect} alongside {@link WsConnectionOptions}. */
+export type { CoreConnectionOptions, WsConnectionOptions };
 
 /**
  * Connect to NATS with OTel trace propagation.
  * Mirrors Go version's otelnats.Connect().
+ * Uses {@link https://github.com/nats-io/nats.js | @nats-io/transport-node} (nats.js v3) TCP transport.
  */
 export async function connect(
-  opts?: ConnectionOptions,
+  opts?: NodeConnectionOptions,
   traceOpts?: NatsInstrumentationOptions,
-): Promise<Conn> {
+): Promise<OtelNatsConn> {
   const nc = await natsConnect(opts);
-  return new Conn(nc, traceOpts);
+  return new OtelNatsConn(nc, traceOpts);
 }
 
-export class Conn {
+/**
+ * Connect over W3C WebSocket (browser / Deno / Node with global WebSocket).
+ * Requires peer dependency `@nats-io/nats-core`. Trace context uses NATS message headers
+ * the same as {@link connect}.
+ *
+ * @see https://nats-io.github.io/nats.js/core/functions/wsconnect.html
+ */
+export async function wsconnect(
+  opts?: WsConnectionOptions | CoreConnectionOptions,
+  traceOpts?: NatsInstrumentationOptions,
+): Promise<OtelNatsConn> {
+  const { wsconnect: natsWsConnect, headers: coreHeaders } = await import('@nats-io/nats-core');
+  const nc = await natsWsConnect(opts);
+  return new OtelNatsConn(nc, traceOpts, () => coreHeaders());
+}
+
+export class OtelNatsConn {
   readonly #nc: NatsConnection;
   readonly #traceOpts: NatsInstrumentationOptions | undefined;
+  readonly #createHeaders: () => MsgHdrs;
+  readonly #serverAddress: string;
 
-  constructor(nc: NatsConnection, traceOpts?: NatsInstrumentationOptions) {
+  constructor(
+    nc: NatsConnection,
+    traceOpts?: NatsInstrumentationOptions,
+    createHeaders?: () => MsgHdrs,
+  ) {
     this.#nc = nc;
     this.#traceOpts = traceOpts;
+    this.#createHeaders = createHeaders ?? (() => natsHeaders());
+    this.#serverAddress = OtelNatsConn.#parseServerAddress(nc);
+  }
+
+  static #parseServerAddress(nc: NatsConnection): string {
+    try {
+      const url = new URL(nc.getServer());
+      return url.hostname;
+    } catch {
+      return nc.getServer();
+    }
   }
 
   /** Returns the underlying NatsConnection. Used by JetStream and tests. */
@@ -63,14 +107,9 @@ export class Conn {
     };
   }
 
-  /** Extracts the server hostname for span attributes. */
+  /** Returns the cached server hostname for span attributes. */
   serverAddress(): string {
-    try {
-      const url = new URL(this.#nc.getServer());
-      return url.hostname;
-    } catch {
-      return this.#nc.getServer();
-    }
+    return this.#serverAddress;
   }
 
   async close(): Promise<void> {
@@ -82,21 +121,24 @@ export class Conn {
   }
 
   /**
-   * Publish with a PRODUCER span.
+   * Publish with a PRODUCER span (fire-and-forget).
    * Injects W3C trace context into NATS message headers.
-   * Span name: "send {subject}"
+   * Span name: "{subject} send"
+   *
+   * This is synchronous — `NatsConnection.publish()` does not return a
+   * Promise. Throws synchronously if the connection is closed.
    */
-  async publish(
+  publish(
     ctx: Context,
     subject: string,
     data?: Uint8Array,
-  ): Promise<void> {
+  ): void {
     const { tracer, propagator } = this.traceContext();
     const serverAddress = this.serverAddress();
     const bodySize = data?.length ?? 0;
 
     const span = tracer.startSpan(
-      `send ${subject}`,
+      `${subject} send`,
       {
         kind: SpanKind.PRODUCER,
         attributes: publishAttrs(subject, bodySize, serverAddress),
@@ -104,7 +146,7 @@ export class Conn {
       ctx,
     );
     const spanCtx = trace.setSpan(ctx, span);
-    const hdrs = headers();
+    const hdrs = this.#createHeaders();
     propagator.inject(spanCtx, hdrs, natsHeaderSetter);
 
     try {
@@ -152,7 +194,7 @@ export class Conn {
       const bodySize = msg.data?.length ?? 0;
 
       const span = tracer.startSpan(
-        `process ${subject}`,
+        `${subject} process`,
         {
           kind: SpanKind.CONSUMER,
           attributes: receiveAttrs(
@@ -190,7 +232,7 @@ export class Conn {
     const bodySize = data?.length ?? 0;
 
     const span = tracer.startSpan(
-      `send ${subject}`,
+      `${subject} send`,
       {
         kind: SpanKind.PRODUCER,
         attributes: publishAttrs(subject, bodySize, serverAddress),
@@ -198,7 +240,7 @@ export class Conn {
       ctx,
     );
     const spanCtx = trace.setSpan(ctx, span);
-    const hdrs = headers();
+    const hdrs = this.#createHeaders();
     propagator.inject(spanCtx, hdrs, natsHeaderSetter);
 
     try {
