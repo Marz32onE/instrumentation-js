@@ -61,14 +61,23 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
 
-      - name: Install nats-server
-        run: |
-          curl -sf https://binaries.nats.dev/nats-io/nats-server/v2@latest | sh
-          sudo mv ./nats-server /usr/local/bin/nats-server
-
       - run: make install
 
       - run: make test
+
+  test-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - run: make install
+
+      - run: make test-integration
 
   build:
     runs-on: ubuntu-latest

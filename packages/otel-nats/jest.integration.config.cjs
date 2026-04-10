@@ -2,14 +2,14 @@
 module.exports = {
   preset: 'ts-jest/presets/default-esm',
   testEnvironment: 'node',
-  testMatch: ['**/test/**/*.test.ts'],
-  testPathIgnorePatterns: ['/node_modules/', '/test/integration/'],
-  roots: ['<rootDir>/test'],
+  testMatch: ['**/test/integration/**/*.test.ts'],
+  roots: ['<rootDir>/test/integration'],
   extensionsToTreatAsEsm: ['.ts'],
   moduleNameMapper: {
     '^(\\.{1,2}/.*)\\.js$': '$1',
   },
   collectCoverageFrom: ['src/**/*.ts'],
-  testTimeout: 15000,
+  // Containers can take time to start; allow generous timeout per test
+  testTimeout: 60000,
   forceExit: true,
 };
