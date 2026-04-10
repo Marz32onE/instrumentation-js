@@ -13,7 +13,9 @@ import { Subscriber, Subscription } from 'rxjs';
 import { WebSocketSubject } from 'rxjs/webSocket';
 import type { WebSocketSubjectConfig as RxWebSocketSubjectConfig } from 'rxjs/webSocket';
 
-/** RxJS config plus optional `prependOtelSubprotocol` (default true). */
+/** RxJS config plus optional `prependOtelSubprotocol` (default true).
+ * When enabled, otel-ws tokens are prepended only if user protocols are provided.
+ */
 export type WebSocketSubjectConfig<T = unknown> = RxWebSocketSubjectConfig<T> & {
   prependOtelSubprotocol?: boolean;
 };
@@ -36,10 +38,15 @@ function normalizeUserProtocols(protocols?: string | string[]): string[] {
   return arr.filter((p): p is string => typeof p === 'string' && p.length > 0 && p !== OTEL_WS_PROTOCOL);
 }
 
-/** Offer: `otel-ws` first, then bare user protocols (no `otel-ws+P`). */
-function buildClientProtocolOffer(protocols?: string | string[]): string[] {
+/** Offer: compound `otel-ws+P` tokens first, then bare user protocols.
+ * - No protocol config (undefined) → empty offer, plain ws handshake (passthrough mode).
+ * - Explicitly empty protocol (`''` or `[]`) → empty offer, passthrough mode (no otel-ws injection).
+ */
+function buildClientProtocolOffer(protocols: string | string[] | undefined): string[] {
   const user = [...new Set(normalizeUserProtocols(protocols))];
-  return user.length === 0 ? [OTEL_WS_PROTOCOL] : [OTEL_WS_PROTOCOL, ...user];
+  return user.length === 0
+    ? []
+    : [...user.map(p => `${OTEL_WS_INSTRUMENTED_PREFIX}${p}`), ...user];
 }
 
 function userFacingProtocolFromWire(wire: string): string {
@@ -52,12 +59,17 @@ function userFacingProtocolFromWire(wire: string): string {
   return wire;
 }
 
-function clientEnvelopeActive(wire: string, userProtocols: readonly string[]): boolean {
-  if (wire === OTEL_WS_PROTOCOL || wire.startsWith(OTEL_WS_INSTRUMENTED_PREFIX)) {
-    return true;
-  }
-  return userProtocols.length > 0 && userProtocols.includes(wire);
+/**
+ * Client: enable envelope only when the server explicitly acknowledged otel-ws by returning
+ * "otel-ws" (bare) or the "otel-ws+<subprotocol>" prefix — NOT for bare user subprotocols.
+ * Matches otel-ws `OtelWebSocket` / otel-ws.md Case C (downgrade when server returns bare Pi).
+ */
+function clientEnvelopeActive(wire: string): boolean {
+  return (
+    wire === OTEL_WS_PROTOCOL || wire.startsWith(OTEL_WS_INSTRUMENTED_PREFIX)
+  );
 }
+
 
 function defaultSerializer<T>(value: T): string {
   return JSON.stringify(value);
@@ -88,7 +100,6 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
   private readonly _userDeserializer: NonNullable<
     WebSocketSubjectConfig<T>['deserializer']
   > | null;
-  private readonly _userSubprotocolsForEnvelope: readonly string[];
   private _otelProtocolActive = false;
 
   constructor(urlOrConfig: string | WebSocketSubjectConfig<T>) {
@@ -110,17 +121,14 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
     const userCloseObserver = configIn.closingObserver;
     const merged: WebSocketSubjectConfig<T> = {
       ...rest,
-      protocol: prepend
+      protocol: prepend   
         ? buildClientProtocolOffer(configIn.protocol)
         : configIn.protocol,
       openObserver: {
         next: (event: Event) => {
           const target = event.target as WebSocket | null;
           const rawProtocol = target?.protocol ?? '';
-          holder.inst!._otelProtocolActive = clientEnvelopeActive(
-            rawProtocol,
-            holder.inst!._userSubprotocolsForEnvelope,
-          );
+          holder.inst!._otelProtocolActive = clientEnvelopeActive(rawProtocol);
           if (prepend && target) {
             const facade = userFacingProtocolFromWire(rawProtocol);
             Object.defineProperty(target, 'protocol', {
@@ -149,9 +157,6 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
 
     this._userSerializer = userSerializer ?? null;
     this._userDeserializer = userDeserializer ?? null;
-    this._userSubprotocolsForEnvelope = prepend
-      ? Object.freeze([...new Set(normalizeUserProtocols(configIn.protocol))])
-      : Object.freeze([]);
     this._tracer = getTracerProvider().getTracer('@marz32one/otel-rxjs-ws', version());
   }
 

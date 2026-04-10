@@ -26,6 +26,13 @@ import { webSocket } from '../src/index.js';
 const WS_CTOR = WS as unknown as typeof WebSocket;
 const TEST_TIMEOUT = 5_000;
 const OTEL_WS_PROTOCOL = 'otel-ws';
+const OTEL_WS_INSTRUMENTED_JSON = `${OTEL_WS_PROTOCOL}+json`;
+
+function selectOtelOrPrefixed(protocols: Set<string>): string | false {
+  if (protocols.has(OTEL_WS_INSTRUMENTED_JSON)) return OTEL_WS_INSTRUMENTED_JSON;
+  if (protocols.has(OTEL_WS_PROTOCOL)) return OTEL_WS_PROTOCOL;
+  return false;
+}
 
 function setupOTel() {
   const exporter = new InMemorySpanExporter();
@@ -57,7 +64,7 @@ function startEchoServer(supportsOtel = false) {
     ...(supportsOtel
       ? {
           handleProtocols: (protocols: Set<string>) =>
-            protocols.has(OTEL_WS_PROTOCOL) ? OTEL_WS_PROTOCOL : false,
+            selectOtelOrPrefixed(protocols),
         }
       : {}),
   });
@@ -82,7 +89,7 @@ function startCaptureServer(supportsOtel = false) {
     ...(supportsOtel
       ? {
           handleProtocols: (protocols: Set<string>) =>
-            protocols.has(OTEL_WS_PROTOCOL) ? OTEL_WS_PROTOCOL : false,
+            selectOtelOrPrefixed(protocols),
         }
       : {}),
   });
@@ -109,7 +116,7 @@ function startSendingServer(messageToSend: string, supportsOtel = false) {
     ...(supportsOtel
       ? {
           handleProtocols: (protocols: Set<string>) =>
-            protocols.has(OTEL_WS_PROTOCOL) ? OTEL_WS_PROTOCOL : false,
+            selectOtelOrPrefixed(protocols),
         }
       : {}),
   });
@@ -142,6 +149,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const ws = webSocket<{ body: string }>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
+      protocol: 'json',
     });
 
     const sub = ws.subscribe();
@@ -231,6 +239,79 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     await new Promise<void>((resolve) => wss.close(() => resolve()));
   });
 
+  describe('otel-ws.md spec (client parity with otel-ws)', () => {
+    it('Case C: prepend default + protocol json + plain server returns bare json → no envelope', async () => {
+      let resolveFirst: ((msg: string) => void) | null = null;
+      const firstMessage = new Promise<string>((resolve) => {
+        resolveFirst = resolve;
+      });
+      const wss = new WebSocketServer({
+        port: 0,
+        handleProtocols: (protocols: Set<string>) =>
+          protocols.has('json') ? 'json' : false,
+      });
+      wss.on('connection', (sock) => {
+        sock.on('message', (data) => {
+          if (resolveFirst) {
+            resolveFirst(data.toString());
+            resolveFirst = null;
+          }
+        });
+      });
+      const port = (wss.address() as AddressInfo).port;
+      const ws = webSocket<{ plain: boolean }>({
+        url: `ws://127.0.0.1:${port}`,
+        WebSocketCtor: WS_CTOR,
+        protocol: 'json',
+      });
+      const sub = ws.subscribe();
+      ws.next({ plain: true });
+
+      const raw = await firstMessage;
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      expect(parsed.header).toBeUndefined();
+      expect(parsed.plain).toBe(true);
+
+      sub.unsubscribe();
+      ws.complete();
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+    });
+
+    it('Case E: explicit empty protocol → passthrough mode, no throw, send/receive spans still created', async () => {
+      // New spec: when user provides empty protocol, no otel-ws is injected.
+      // Connection should succeed in passthrough mode (no envelope), spans still created.
+      const wss = new WebSocketServer({ port: 0 });
+      wss.on('connection', (ws) => {
+        ws.on('message', (data) => ws.send(data.toString()));
+      });
+      const port = (wss.address() as AddressInfo).port;
+
+      const ws = webSocket<string>({
+        url: `ws://127.0.0.1:${port}`,
+        WebSocketCtor: WS_CTOR,
+        protocol: '',
+      });
+
+      const msgPromise = firstValueFrom(ws.pipe(timeout(TEST_TIMEOUT)));
+      const sub = ws.subscribe();
+      ws.next('passthrough-msg');
+      const received = await msgPromise;
+
+      // raw message passes through without envelope
+      expect(received).toBe('passthrough-msg');
+
+      const spans = exporter.getFinishedSpans();
+      const sendSpans = spans.filter((s) => s.name === 'websocket.send');
+      const receiveSpans = spans.filter((s) => s.name === 'websocket.receive');
+      expect(sendSpans).toHaveLength(1);
+      expect(receiveSpans).toHaveLength(1);
+
+      sub.unsubscribe();
+      ws.complete();
+      await new Promise<void>((r) => wss.close(() => r()));
+    });
+  });
+
   it('creates a CONSUMER span on receive', async () => {
     const msg = JSON.stringify({
       header: { traceparent: '00-12345678901234567890123456789012-0123456789012345-01' },
@@ -240,6 +321,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const ws = webSocket<{ body: string }>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
+      protocol: 'json',
     });
 
     const received = await firstValueFrom(ws.pipe(timeout(TEST_TIMEOUT)));
@@ -264,6 +346,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const ws = webSocket<{ body: string }>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
+      protocol: 'json',
     });
 
     const tidPromise = new Promise<string | undefined>((resolve) => {
@@ -290,6 +373,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const ws = webSocket<{ body: string }>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
+      protocol: 'json',
     });
 
     const msgPromise = firstValueFrom(ws.pipe(timeout(TEST_TIMEOUT)));
@@ -319,6 +403,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const ws = webSocket<string>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
+      protocol: 'json',
     });
 
     const sub = ws.subscribe();
@@ -342,6 +427,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const ws = webSocket<string>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
+      protocol: 'json',
     });
 
     const msgPromise = firstValueFrom(ws.pipe(timeout(TEST_TIMEOUT)));
@@ -360,6 +446,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const ws = webSocket<number[]>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
+      protocol: 'json',
     });
 
     const msgPromise = firstValueFrom(ws.pipe(timeout(TEST_TIMEOUT)));
@@ -411,6 +498,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const ws = webSocket({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
+      protocol: 'json',
     });
     const sub = ws.subscribe();
     ws.next({ x: 1 });
@@ -433,6 +521,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const ws = webSocket<string>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
+      protocol: 'json',
       deserializer: () => {
         throw new Error('deserializer failed');
       },
@@ -457,6 +546,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const ws = webSocket<{ msg: string; version: string; support: string[] }>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
+      protocol: 'json',
     });
     const sub = ws.subscribe();
 
@@ -488,7 +578,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const wss = new (await import('ws')).WebSocketServer({
       port: 0,
       handleProtocols: (protocols: Set<string>) =>
-        protocols.has(OTEL_WS_PROTOCOL) ? OTEL_WS_PROTOCOL : false,
+        selectOtelOrPrefixed(protocols),
     });
     wss.on('connection', (client) => {
       setTimeout(() => client.send(msg1), 20);
@@ -499,6 +589,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const ws = webSocket<string>({
       url: `ws://127.0.0.1:${port}`,
       WebSocketCtor: WS_CTOR,
+      protocol: 'json',
     });
 
     const receivedTraceIds: (string | undefined)[] = [];
@@ -524,6 +615,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const ws = webSocket<{ val: number }>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
+      protocol: 'json',
       serializer: (v) => JSON.stringify(v),
     });
     const sub = ws.subscribe();
@@ -545,6 +637,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const ws = webSocket<{ val: number }>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
+      protocol: 'json',
       // Return an ArrayBuffer — valid for ws.send() so the socket stays open,
       // but not a string, so our code sets ERROR status on the span.
       serializer: () => new ArrayBuffer(4) as unknown as string,
@@ -582,7 +675,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const wss = new (await import('ws')).WebSocketServer({
       port: 0,
       handleProtocols: (protocols: Set<string>) =>
-        protocols.has(OTEL_WS_PROTOCOL) ? OTEL_WS_PROTOCOL : false,
+        selectOtelOrPrefixed(protocols),
     });
     wss.on('connection', (client) => {
       // Small delay so the client's openObserver fires and sets _otelProtocolActive
@@ -596,6 +689,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const ws = webSocket<{ index: number }>({
       url: `ws://127.0.0.1:${port}`,
       WebSocketCtor: WS_CTOR,
+      protocol: 'json',
     });
 
     const receivedTraceIds: (string | undefined)[] = [];
@@ -631,6 +725,7 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     const ws = webSocket<{ transformed: boolean }>({
       url: `ws://127.0.0.1:${server.port}`,
       WebSocketCtor: WS_CTOR,
+      protocol: 'json',
       deserializer: (e: MessageEvent) => {
         deserializerInput = e.data as string;
         return JSON.parse(e.data as string) as { transformed: boolean };

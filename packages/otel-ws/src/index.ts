@@ -24,22 +24,6 @@ import {
 import { getTracerProvider } from "./options.js";
 import { version } from "./version.js";
 
-type WsMessageEvent = Parameters<BaseWebSocket["on"]>[0];
-type WsListener = (...args: unknown[]) => void;
-type WsWithInternals = BaseWebSocket & {
-  _sender?: {
-    sendFrame?: (
-      list: ReadonlyArray<Buffer>,
-      cb?: (err?: Error) => void,
-    ) => void;
-  };
-};
-
-type WsHandleProtocols = (
-  protocols: Set<string>,
-  request: IncomingMessage,
-) => string | false;
-
 const OTEL_WS_PROTOCOL = "otel-ws";
 /** Defensive / non-RFC wire prefix; negotiated subprotocol is usually bare `Pi` or `otel-ws`. */
 const OTEL_WS_INSTRUMENTED_PREFIX = `${OTEL_WS_PROTOCOL}+`;
@@ -63,20 +47,29 @@ const SKIP_FRAME_INJECT_KEY = createContextKey(
   "@marz32one/otel-ws/skip-frame-inject",
 );
 
-function normalizeUserProtocols(protocols?: string | string[]): string[] {
-  if (protocols == null) return [];
-  const arr = Array.isArray(protocols) ? [...protocols] : [protocols];
-  return arr.filter(
-    (p): p is string =>
-      typeof p === "string" && p.length > 0 && p !== OTEL_WS_PROTOCOL,
-  );
-}
+type WsListener = (...args: unknown[]) => void;
+type WsWithInternals = BaseWebSocket & {
+  _sender?: {
+    sendFrame?: (
+      list: ReadonlyArray<Buffer>,
+      cb?: (err?: Error) => void,
+    ) => void;
+  };
+};
 
-/** Client Sec-WebSocket-Protocol offer: `otel-ws` first, then bare user protocols (no `otel-ws+P`). */
-function buildClientProtocolOffer(protocols?: string | string[]): string[] {
-  const user = [...new Set(normalizeUserProtocols(protocols))];
-  return user.length === 0 ? [OTEL_WS_PROTOCOL] : [OTEL_WS_PROTOCOL, ...user];
-}
+type WsHandleProtocols = (
+  protocols: Set<string>,
+  request: IncomingMessage,
+) => string | false;
+
+type WsRecord = BaseWebSocket & Record<symbol, unknown>;
+
+// A narrow callable alias for ws.on/ws.off when passing a general listener.
+// Avoids `as never` hacks caused by TypeScript's union-overload resolution on EventEmitter.
+type WsEmitGeneric = (
+  event: string | symbol,
+  listener: WsListener,
+) => BaseWebSocket;
 
 /**
  * Maps the on-the-wire negotiated subprotocol to the user-facing `ws.protocol`
@@ -103,20 +96,13 @@ function firstSubprotocolFromHeader(
 }
 
 /**
- * Client: enable envelope when the negotiated subprotocol implies an otel-ws handshake,
- * or when a bare user subprotocol was selected after we offered `otel-ws` first (paired server).
+ * Client: enable envelope only when the server explicitly acknowledged otel-ws by returning
+ * "otel-ws" (bare) or the "otel-ws+<subprotocol>" prefix — NOT for bare user subprotocols.
  */
-function clientEnvelopeActive(
-  wire: string,
-  userProtocols: readonly string[],
-): boolean {
-  if (
-    wire === OTEL_WS_PROTOCOL ||
-    wire.startsWith(OTEL_WS_INSTRUMENTED_PREFIX)
-  ) {
-    return true;
-  }
-  return userProtocols.length > 0 && userProtocols.includes(wire);
+function clientEnvelopeActive(wire: string): boolean {
+  return (
+    wire === OTEL_WS_PROTOCOL || wire.startsWith(OTEL_WS_INSTRUMENTED_PREFIX)
+  );
 }
 
 /** Negotiated subprotocol as seen on the wire (prefer `_protocol`; fall back to `protocol` getter for server sockets in some runtimes). */
@@ -128,23 +114,6 @@ function readWireSubprotocol(ws: BaseWebSocket): string {
   const viaGetter = typeof ws.protocol === "string" ? ws.protocol : "";
   return viaGetter;
 }
-
-export type InstrumentSocketOptions = {
-  /**
-   * Server path: when the client offer's first subprotocol token was `otel-ws`, force envelope mode
-   * regardless of the negotiated bare `Pi` on `ws.protocol`.
-   */
-  envelope?: boolean;
-};
-
-type WsRecord = BaseWebSocket & Record<symbol, unknown>;
-
-// A narrow callable alias for ws.on/ws.off when passing a general listener.
-// Avoids `as never` hacks caused by TypeScript's union-overload resolution on EventEmitter.
-type WsEmitGeneric = (
-  event: string | symbol,
-  listener: WsListener,
-) => BaseWebSocket;
 
 function isOtelActive(ws: BaseWebSocket): boolean {
   return (ws as WsRecord)[OTEL_ACTIVE_SYMBOL] === true;
@@ -173,78 +142,45 @@ function startMessagingSpan(
   );
 }
 
-class InstrumentedWebSocketServer extends BaseWebSocket.Server {
-  constructor(options?: BaseWebSocket.ServerOptions, callback?: () => void) {
-    // ws@5 ServerOptions types model handleProtocols loosely; narrow at runtime boundary.
-    const userHandleProtocols: WsHandleProtocols | undefined =
-      options !== undefined && typeof options.handleProtocols === "function"
-        ? (options.handleProtocols as WsHandleProtocols)
-        : undefined;
-    super(
-      {
-        ...options,
-        handleProtocols(
-          protocols: Set<string>,
-          req: IncomingMessage,
-        ): string | false {
-          const list = [...protocols];
-          if (list[0] === OTEL_WS_PROTOCOL) {
-            const rest = list.slice(1);
-            if (rest.length === 0) {
-              return OTEL_WS_PROTOCOL;
-            }
-            if (!userHandleProtocols) {
-              return false;
-            }
-            const selected = userHandleProtocols(new Set(rest), req);
-            if (selected === false) {
-              return false;
-            }
-            if (typeof selected === "string" && !rest.includes(selected)) {
-              return false;
-            }
-            return selected;
-          }
-          if (userHandleProtocols) {
-            return userHandleProtocols(protocols, req);
-          }
-          return false;
-        },
-      },
-      callback,
-    );
-    this.on("connection", (ws: BaseWebSocket, req: IncomingMessage) => {
-      const first = firstSubprotocolFromHeader(
-        req.headers["sec-websocket-protocol"],
-      );
-      instrumentSocket(ws, { envelope: first === OTEL_WS_PROTOCOL });
-    });
-  }
-}
-
 export class OtelWebSocket extends BaseWebSocket {
-  static readonly Server: typeof BaseWebSocket.Server =
-    InstrumentedWebSocketServer;
-
   constructor(
     address: string,
     protocols?: string | string[],
     options?: BaseWebSocket.ClientOptions,
   ) {
-    const user = [...new Set(normalizeUserProtocols(protocols))];
-    super(address, buildClientProtocolOffer(protocols), options);
+    const normalized = (
+      Array.isArray(protocols) ? protocols : protocols ? [protocols] : []
+    ).filter(
+      (p): p is string =>
+        typeof p === "string" && p.length > 0 && p !== OTEL_WS_PROTOCOL,
+    );
+    const user = [...new Set(normalized)];
+    // No user subprotocols -> keep a plain ws handshake (no implicit otel-ws offer).
+    // This preserves compatibility for endpoints that intentionally use empty protocol negotiation.
+    const offer =
+      user.length === 0
+        ? []
+        : [...user.map(p => `${OTEL_WS_INSTRUMENTED_PREFIX}${p}`), ...user];
+    super(address, offer, options);
     (this as WsRecord)[USER_PROTO_LIST_SYMBOL] = user;
-    // This client always offers `otel-ws`; any successful handshake used that offer, so enable envelope on open.
-    // (Do not gate on reading `_protocol` here — subclass / timing can leave it empty in the first `open` tick.)
     (this as unknown as EventEmitter).prependOnceListener("open", () => {
-      setOtelActive(this);
-      // `ws` types `protocol` as a data field; replace with a facade after handshake (RFC uses bare `Pi`).
+      const wire = String(
+        (this as unknown as { protocol?: string }).protocol ?? "",
+      );
+      if (
+        wire === OTEL_WS_PROTOCOL ||
+        wire.startsWith(OTEL_WS_INSTRUMENTED_PREFIX)
+      ) {
+        setOtelActive(this);
+      }
+      // Replace the data field with a getter. Use the captured `wire` as fallback for
+      // runtimes (ws@5) that do not expose `_protocol`.
       Object.defineProperty(this, "protocol", {
         configurable: true,
         enumerable: true,
         get: () =>
           userFacingProtocolFromWire(
-            (this as unknown as { _protocol?: string })._protocol ?? "",
+            (this as unknown as { _protocol?: string })._protocol ?? wire,
           ),
       });
     });
@@ -252,16 +188,87 @@ export class OtelWebSocket extends BaseWebSocket {
   }
 }
 
+// eslint-disable-next-line @typescript-eslint/no-namespace
+export namespace OtelWebSocket {
+  /** Instrumented WebSocket server. Mirrors WebSocket.Server from the ws package. */
+  export class Server extends BaseWebSocket.Server {
+    constructor(options?: BaseWebSocket.ServerOptions, callback?: () => void) {
+      // ws@5 ServerOptions types model handleProtocols loosely; narrow at runtime boundary.
+      const userHandleProtocols: WsHandleProtocols | undefined =
+        options !== undefined && typeof options.handleProtocols === "function"
+          ? (options.handleProtocols as WsHandleProtocols)
+          : undefined;
+      super(
+        {
+          ...options,
+          handleProtocols(
+            protocols: Set<string>,
+            req: IncomingMessage,
+          ): string | false {
+            if (!userHandleProtocols) return false;
+
+            const list = [...protocols];
+            if (list.some(p => p === OTEL_WS_PROTOCOL || p.startsWith(OTEL_WS_INSTRUMENTED_PREFIX))) {
+              // Filter out all otel-ws sentinel tokens; pass only bare user protocols.
+              const userProtos = list.filter(
+                (p) =>
+                  p !== OTEL_WS_PROTOCOL &&
+                  !p.startsWith(OTEL_WS_INSTRUMENTED_PREFIX),
+              );
+              // No explicit length===0 guard: if userProtos is empty, userHandleProtocols may return
+              // a protocol the client never offered; ws's own handshake validation rejects it naturally.
+              const selected = userHandleProtocols(new Set(userProtos), req);
+              if (selected === false) return false;
+              // Signal otel-ws awareness by prefixing the selected subprotocol.
+              // Client enables envelope only when it receives this prefix back.
+              return `${OTEL_WS_INSTRUMENTED_PREFIX}${selected}`;
+            }
+            return userHandleProtocols(protocols, req);
+          },
+        },
+        callback,
+      );
+      this.on("connection", (ws: BaseWebSocket, req: IncomingMessage) => {
+        const first = firstSubprotocolFromHeader(
+          req.headers["sec-websocket-protocol"],
+        );
+        // Enable envelope when client offered otel-ws (bare "otel-ws" or "otel-ws+P" prefix).
+        const envelope =
+          first === OTEL_WS_PROTOCOL ||
+          (typeof first === "string" &&
+            first.startsWith(OTEL_WS_INSTRUMENTED_PREFIX));
+        instrumentSocket(ws, { envelope });
+        // Strip otel-ws+ prefix so server-side users see the clean protocol name.
+        const rawProtocol = ws.protocol;
+        Object.defineProperty(ws, "protocol", {
+          configurable: true,
+          enumerable: true,
+          get: () => userFacingProtocolFromWire(rawProtocol),
+        });
+      });
+    }
+  }
+
+  /**
+   * Options for {@link instrumentSocket}.
+   * Server path: pass `envelope: true` when the client offered `otel-ws` first.
+   */
+  export type InstrumentSocketOptions = {
+    /**
+     * When the client offer's first subprotocol token was `otel-ws`, force
+     * envelope mode regardless of the negotiated bare subprotocol on `ws.protocol`.
+     */
+    envelope?: boolean;
+  };
+}
+
 export default OtelWebSocket;
 
 export function instrumentSocket(
   ws: BaseWebSocket,
-  opts?: InstrumentSocketOptions,
+  opts?: OtelWebSocket.InstrumentSocketOptions,
 ): BaseWebSocket {
   const tracer = getTracerProvider().getTracer("@marz32one/otel-ws", version());
-  const userList =
-    ((ws as WsRecord)[USER_PROTO_LIST_SYMBOL] as string[] | undefined) ?? [];
-
   if (ws.readyState === BaseWebSocket.OPEN) {
     const tryActivate = (): void => {
       const wire = readWireSubprotocol(ws);
@@ -269,7 +276,7 @@ export function instrumentSocket(
         setOtelActive(ws);
       } else if (opts?.envelope === false) {
         return;
-      } else if (clientEnvelopeActive(wire, userList)) {
+      } else if (clientEnvelopeActive(wire)) {
         setOtelActive(ws);
       }
     };
@@ -290,7 +297,7 @@ export function instrumentSocket(
       if (opts?.envelope === true) {
         setOtelActive(ws);
       } else if (opts?.envelope !== false) {
-        if (clientEnvelopeActive(wire, userList)) setOtelActive(ws);
+        if (clientEnvelopeActive(wire)) setOtelActive(ws);
       }
       // _sender is available only after the connection is open.
       patchNativeSendFrame(ws, tracer);
@@ -427,7 +434,7 @@ function patchNativeOnMessage(
   const originalOn = wsAny[ORIGINAL_ON_SYMBOL] as WsEmitGeneric;
   const originalOff = wsAny[ORIGINAL_OFF_SYMBOL] as WsEmitGeneric;
   const wrappedHandlers = wsAny[WRAPPED_HANDLERS_SYMBOL];
-  ws.on = ((event: WsMessageEvent, listener: WsListener) => {
+  ws.on = ((event: string | symbol, listener: WsListener) => {
     if (event !== "message" || typeof listener !== "function") {
       return originalOn(event, listener);
     }
@@ -458,7 +465,7 @@ function patchNativeOnMessage(
     return originalOn(event, wrapped);
   }) as BaseWebSocket["on"];
 
-  ws.off = ((event: WsMessageEvent, listener: WsListener) => {
+  ws.off = ((event: string | symbol, listener: WsListener) => {
     if (event !== "message" || typeof listener !== "function") {
       return originalOff(event, listener);
     }
@@ -490,15 +497,20 @@ function patchNativeSend(
         SpanKind.PRODUCER,
         activeCtx,
       );
-      if (typeof optionsOrCb === "function" || optionsOrCb === undefined) {
-        originalSend(data as never, (sendErr?: Error) =>
-          finishSendSpan(span, sendErr, cb),
-        );
-      } else {
-        originalSend(data as never, optionsOrCb as never, (sendErr?: Error) =>
-          finishSendSpan(span, sendErr, cb),
-        );
-      }
+      // Set SKIP_FRAME_INJECT_KEY so patchNativeSendFrame does not create a duplicate span
+      // for this passthrough send (mirrors the active-path behaviour at line 520).
+      const skipCtx = activeCtx.setValue(SKIP_FRAME_INJECT_KEY, true);
+      otelContext.with(skipCtx, () => {
+        if (typeof optionsOrCb === "function" || optionsOrCb === undefined) {
+          originalSend(data as never, (sendErr?: Error) =>
+            finishSendSpan(span, sendErr, cb),
+          );
+        } else {
+          originalSend(data as never, optionsOrCb as never, (sendErr?: Error) =>
+            finishSendSpan(span, sendErr, cb),
+          );
+        }
+      });
       return;
     }
 
@@ -553,6 +565,10 @@ function patchNativeSendFrame(
   ) => {
     // Skip if this frame was already instrumented by patchNativeSend.
     if (otelContext.active().getValue(SKIP_FRAME_INJECT_KEY)) {
+      return originalSendFrame(list, cb);
+    }
+    // Skip control frames (close=0x8, ping=0x9, pong=0xa) — not user message sends.
+    if (list.length > 0 && list[0].length >= 1 && (list[0][0] & 0x0f) >= 0x8) {
       return originalSendFrame(list, cb);
     }
 

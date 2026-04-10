@@ -80,7 +80,7 @@ Identical to [`rxjs/webSocket`](https://rxjs.dev/api/webSocket): exports only `w
 
 Native Node.js `ws` wrapper. Same envelope wire format as `otel-rxjs-ws`.
 
-Automatically prepends `otel-ws` and `json` to the subprotocol list. Envelope injection is active only when `otel-ws` is confirmed by the server.
+Prepends `otel-ws` to the front of the offered subprotocol list. Envelope injection is active when the server acknowledges otel-ws by responding with `otel-ws+<protocol>` or bare `otel-ws`.
 
 ```typescript
 import WebSocket from '@marz32one/otel-ws';

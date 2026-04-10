@@ -1,11 +1,13 @@
 import eslint from '@eslint/js';
+import { defineConfig } from 'eslint/config';
 import tseslint from 'typescript-eslint';
 
-export default tseslint.config(
+export default defineConfig(
   { ignores: ['**/dist/**', '**/node_modules/**', '**/jest.config.cjs'] },
   eslint.configs.recommended,
-  ...tseslint.configs.recommendedTypeChecked,
   {
+    files: ['packages/**/*.ts'],
+    extends: [...tseslint.configs.recommendedTypeChecked],
     languageOptions: {
       parserOptions: {
         project: [
