@@ -25,19 +25,6 @@ function makeSubIter(messages: MockMsg[]): Subscription {
   } as unknown as Subscription;
 }
 
-/** Build a mock Msg whose headers carry a valid traceparent. */
-function msgWithTrace(): MockMsg {
-  const tracer = trace.getTracerProvider().getTracer('test');
-  const span = tracer.startSpan('producer', { kind: SpanKind.PRODUCER }, ROOT_CONTEXT);
-  const ctx = trace.setSpan(ROOT_CONTEXT, span);
-  const hdrs = natsHeaders();
-  import('@opentelemetry/api').then(({ propagation }) =>
-    propagation.inject(ctx, hdrs as unknown as Record<string, unknown>),
-  );
-  span.end();
-  return { subject: 'mock.subject', data: enc.encode('payload'), headers: hdrs };
-}
-
 /** Create a mock NatsConnection. */
 function makeMockNc(opts?: {
   publishThrows?: boolean;
