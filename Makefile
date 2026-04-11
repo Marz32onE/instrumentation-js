@@ -1,4 +1,4 @@
-.PHONY: install build test lint clean publish-dry
+.PHONY: install build test test-integration lint clean publish-dry
 
 # Install all workspace dependencies
 install:
@@ -6,13 +6,17 @@ install:
 
 # Build publishable packages
 build:
-	npm run build -w packages/otel-ws -w packages/otel-rxjs-ws
+	npm run build -w packages/otel-ws -w packages/otel-rxjs-ws -w packages/otel-nats
 
 # Run all tests
 test:
 	npm run test --workspaces
 
-# Type-check (tsc --noEmit) + ESLint (see eslint.config.mjs)
+# Run integration tests for otel-nats (requires Docker)
+test-integration:
+	npm run test:integration -w packages/otel-nats
+
+# Type-check (tsc --noEmit per workspace) + ESLint (see eslint.config.mjs)
 lint:
 	npm run lint
 
