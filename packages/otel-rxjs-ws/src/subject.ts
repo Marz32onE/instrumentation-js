@@ -39,10 +39,13 @@ function normalizeUserProtocols(protocols?: string | string[]): string[] {
 }
 
 /** Offer: compound `otel-ws+P` tokens first, then bare user protocols.
- * - No protocol config (undefined) → empty offer, plain ws handshake (passthrough mode).
+ * - No protocol config (undefined) → `['otel-ws']`, default trace-enabled offer.
  * - Explicitly empty protocol (`''` or `[]`) → empty offer, passthrough mode (no otel-ws injection).
  */
 function buildClientProtocolOffer(protocols: string | string[] | undefined): string[] {
+  // undefined = user did not configure a protocol → offer bare 'otel-ws' by default
+  if (protocols === undefined) return [OTEL_WS_PROTOCOL];
+
   const user = [...new Set(normalizeUserProtocols(protocols))];
   return user.length === 0
     ? []
@@ -70,6 +73,88 @@ function clientEnvelopeActive(wire: string): boolean {
   );
 }
 
+
+// ---------------------------------------------------------------------------
+// FallbackWebSocket — transparent proxy used when the default ['otel-ws'] offer
+// is rejected by a server that performs strict subprotocol validation.
+// On the first close-before-open it retries once without any protocol; if that
+// also fails the close event is forwarded to RxJS normally.
+// ---------------------------------------------------------------------------
+
+type WsLike = InstanceType<typeof WebSocket>;
+
+function createFallbackCtor(OrigCtor: new (...a: unknown[]) => WsLike) {
+  return class FallbackWebSocket {
+    private _ws!: WsLike;
+    private _opened = false;
+    private _retried = false;
+    private readonly _url: string;
+
+    // Handler storage shared across both WS instances so RxJS property
+    // assignments made after construction are captured correctly.
+    private readonly _h: {
+      onopen:    ((ev: Event) => unknown) | null;
+      onclose:   ((ev: CloseEvent) => unknown) | null;
+      onmessage: ((ev: MessageEvent) => unknown) | null;
+      onerror:   ((ev: Event) => unknown) | null;
+    } = { onopen: null, onclose: null, onmessage: null, onerror: null };
+
+    constructor(url: string, protocols?: string | string[]) {
+      this._url = url;
+      this._connect(protocols);
+    }
+
+    private _connect(protocols?: string | string[]) {
+      const ws = (protocols?.length
+        ? new OrigCtor(this._url, protocols)
+        : new OrigCtor(this._url)) as WsLike;
+      this._ws = ws;
+
+      ws.onopen    = (e) => { this._opened = true; this._h.onopen?.call(ws, e); };
+      ws.onmessage = (e) => this._h.onmessage?.call(ws, e as MessageEvent);
+      ws.onerror   = (e) => {
+        if (!this._opened && !this._retried) {
+          // Pre-open error: suppress so RxJS does not error the observable before
+          // the close event triggers our retry. If the retry also fails, the close
+          // handler will forward the close to RxJS which errors it naturally.
+          return;
+        }
+        this._h.onerror?.call(ws, e);
+      };
+      ws.onclose   = (e) => {
+        if (!this._opened && !this._retried) {
+          // Server rejected our subprotocol offer — retry once without protocols.
+          this._retried = true;
+          this._connect();
+          return;
+        }
+        this._h.onclose?.call(ws, e as CloseEvent);
+      };
+    }
+
+    // RxJS assigns these as plain properties after constructing the socket.
+    get onopen()    { return this._h.onopen; }    set onopen(h)    { this._h.onopen = h; }
+    get onclose()   { return this._h.onclose; }   set onclose(h)   { this._h.onclose = h; }
+    get onmessage() { return this._h.onmessage; } set onmessage(h) { this._h.onmessage = h; }
+    get onerror()   { return this._h.onerror; }   set onerror(h)   { this._h.onerror = h; }
+
+    // Delegated to the active inner socket.
+    get readyState()     { return this._ws.readyState; }
+    // After successful fallback, protocol === '' → clientEnvelopeActive returns false → passthrough mode.
+    get protocol()       { return this._ws.protocol; }
+    get url()            { return this._ws.url; }
+    get bufferedAmount() { return this._ws.bufferedAmount; }
+    get extensions()     { return this._ws.extensions; }
+    get binaryType()     { return this._ws.binaryType; }
+    set binaryType(v: BinaryType) { this._ws.binaryType = v; }
+
+    send(d: Parameters<WsLike['send']>[0])       { this._ws.send(d); }
+    close(code?: number, reason?: string)         { this._ws.close(code, reason); }
+    addEventListener(...a: Parameters<WsLike['addEventListener']>)       { this._ws.addEventListener(...a); }
+    removeEventListener(...a: Parameters<WsLike['removeEventListener']>) { this._ws.removeEventListener(...a); }
+    dispatchEvent(e: Event): boolean              { return this._ws.dispatchEvent(e); }
+  };
+}
 
 function defaultSerializer<T>(value: T): string {
   return JSON.stringify(value);
@@ -121,9 +206,17 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
     const userCloseObserver = configIn.closingObserver;
     const merged: WebSocketSubjectConfig<T> = {
       ...rest,
-      protocol: prepend   
+      protocol: prepend
         ? buildClientProtocolOffer(configIn.protocol)
         : configIn.protocol,
+      // When the default offer (['otel-ws']) is used, wrap the WebSocket constructor
+      // so that a server-side subprotocol rejection is handled transparently: the
+      // proxy retries once without any protocol and connects in passthrough mode.
+      WebSocketCtor: (prepend && configIn.protocol === undefined)
+        ? (createFallbackCtor(
+            (rest.WebSocketCtor ?? WebSocket) as unknown as new (...a: unknown[]) => WsLike,
+          ) as unknown as typeof WebSocket)
+        : rest.WebSocketCtor,
       openObserver: {
         next: (event: Event) => {
           const target = event.target as WebSocket | null;
@@ -297,10 +390,15 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
       }
     }
 
+    // Use dynamic access to avoid a static 'Buffer' type reference;
+    // tsconfig targets browser lib (no @types/node) so Buffer is not in scope.
+    const NodeBuffer = (globalThis as Record<string, unknown>)['Buffer'] as
+      | { isBuffer(v: unknown): v is { toString(enc: string): string } }
+      | undefined;
     const raw =
       typeof e.data === 'string' || typeof e.data === 'number'
         ? String(e.data)
-        : typeof Buffer !== 'undefined' && Buffer.isBuffer(e.data)
+        : NodeBuffer?.isBuffer(e.data)
           ? e.data.toString('utf8')
           : String(e.data);
 
