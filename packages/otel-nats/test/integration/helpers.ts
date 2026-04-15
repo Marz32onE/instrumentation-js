@@ -2,7 +2,7 @@
  * NATS via Testcontainers. Default GenericContainer wait is already port-based;
  * we set `Wait.forListeningPorts()` explicitly so startup does not depend on image log wording.
  *
- * If tests fail with `Log stream ended and message "/.*Started.*/" was not received`, that
+ * If tests fail with a log-wait error (log stream ended, expected line matching Ryuk "Started"), that
  * usually indicates Ryuk (testcontainers reaper) could not start — fix Docker socket access,
  * or set `TESTCONTAINERS_RYUK_DISABLED=true` (disables session-scoped cleanup; use with care).
  */

@@ -12,9 +12,10 @@ build:
 test:
 	npm run test --workspaces
 
-# Run integration tests for otel-nats (requires Docker)
+# Run integration tests for otel-nats (requires Docker).
+# Ryuk log-wait is flaky on some hosts; align with CI (.github/workflows/ci.yml).
 test-integration:
-	npm run test:integration -w packages/otel-nats
+	TESTCONTAINERS_RYUK_DISABLED=true npm run test:integration -w packages/otel-nats
 
 # Type-check (tsc --noEmit per workspace) + ESLint (see eslint.config.mjs)
 lint:

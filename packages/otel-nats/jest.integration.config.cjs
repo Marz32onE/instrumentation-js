@@ -11,5 +11,7 @@ module.exports = {
   collectCoverageFrom: ['src/**/*.ts'],
   // Containers can take time to start; allow generous timeout per test
   testTimeout: 60000,
+  // One worker avoids parallel GenericContainer starts against Docker on CI
+  maxWorkers: 1,
   forceExit: true,
 };
