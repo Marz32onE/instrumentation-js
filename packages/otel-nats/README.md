@@ -1,8 +1,15 @@
 # @marz32one/otel-nats
 
-OpenTelemetry trace propagation for NATS JavaScript clients: **W3C Trace Context** (`traceparent` / `tracestate`) is **injected and extracted on NATS message headers** (`MsgHdrs`), compatible with the Go [`instrumentation-go/otel-nats`](https://github.com/Marz32onE/instrumentation-go) pattern.
+OpenTelemetry trace propagation for NATS JavaScript clients: **W3C Trace Context** (`traceparent` / `tracestate`) on **NATS message headers** (`MsgHdrs`), aligned with the Go [`instrumentation-go/otel-nats`](https://github.com/Marz32onE/instrumentation-go) tracing semantics.
 
-**v1.x** aligns with [nats.js v3](https://github.com/nats-io/nats.js) modular packages (`@nats-io/transport-node`, `@nats-io/jetstream`, `@nats-io/nats-core`). If you used the legacy `nats` npm v2 client with `@marz32one/otel-nats` 0.x, upgrade your app to v3 clients and this package together.
+Public APIs follow **[nats.js v3](https://github.com/nats-io/nats.js)** (`@nats-io/transport-node`, `@nats-io/jetstream`, `@nats-io/nats-core`) method shapes. Tracing is added by:
+
+- Optional **`otelContext`** on publish / request / JetStream publish options (defaults to `context.active()` when omitted).
+- **`getMessageTraceContext(msg)`** / **`getJetStreamMessageTraceContext(jsMsg)`** for the OpenTelemetry `Context` after subscribe / JetStream consume / fetch / next.
+
+See [docs/nats-api-matrix.md](docs/nats-api-matrix.md) for wrap vs delegate coverage.
+
+**Migrating from 0.1.x:** use `publish(subject, data, { otelContext })` instead of `publish(ctx, subject, data)`; `subscribe()` returns a native `Subscription` of `Msg` — use `getMessageTraceContext(msg)`; JetStream: `js.consumers.get(stream, name)` with `consume()` / `fetch({ max_messages })` instead of `js.consumer()` / `messages()` / `fetch(n)`.
 
 ## Requirements
 
@@ -22,28 +29,31 @@ For JetStream (`createJetStream` / `./jetstream`):
 npm install @nats-io/jetstream
 ```
 
-For WebSocket (`wsconnect`), ensure `@nats-io/nats-core` is installed (pulled in by `transport-node`, or add explicitly).
+For WebSocket (`wsconnect`), ensure `@nats-io/nats-core` is available (pulled in by `transport-node`, or add explicitly).
 
-Peer dependencies:
-
-| Package | Role |
-|--------|------|
-| `@nats-io/transport-node` | Required for `connect()` (TCP / Node). |
-| `@nats-io/jetstream` | Required when using `./jetstream` or `createJetStream()`. |
-| `@nats-io/nats-core` | Optional; required when calling `wsconnect()` (WebSocket transport). |
-
-## TCP (`connect`)
+## Core NATS (`connect`)
 
 ```typescript
-import { connect } from '@marz32one/otel-nats';
+import { connect, getMessageTraceContext } from '@marz32one/otel-nats';
 
 const conn = await connect({ servers: 'nats://127.0.0.1:4222' });
-await conn.publish(ctx, 'hello', data);
+
+// Same shape as NatsConnection.publish(subject, payload?, options?) + otelContext
+conn.publish('hello', data, { otelContext: ctx });
+
+const sub = conn.subscribe('hello');
+for await (const msg of sub) {
+  const c = getMessageTraceContext(msg);
+  // use c for child spans
+  break;
+}
+
+await conn.request('rpc.subject', payload, { timeout: 5000, otelContext: ctx });
 ```
 
-## WebSocket (`wsconnect`)
+Optional **`NatsInstrumentationOptions.traceDestination`**: default `Nats-Trace-Dest` header on core publishes (NATS server 2.11+). Per-call override: `publish(..., { traceDestination: 'my.trace.subject' })` (core) or JetStream `publish(..., { traceDestination: '...' })`.
 
-Uses [`wsconnect`](https://nats-io.github.io/nats.js/core/functions/wsconnect.html) from `@nats-io/nats-core`. In Node without a global `WebSocket`, pass `wsFactory` (see [`WsConnectionOptions`](https://nats-io.github.io/nats.js/core/interfaces/WsConnectionOptions.html)):
+## WebSocket (`wsconnect`)
 
 ```typescript
 import Ws from 'ws';
@@ -58,11 +68,30 @@ const conn = await wsconnect({
 });
 ```
 
-Exported types include `WsConnectionOptions` and `CoreConnectionOptions` (alias for `@nats-io/nats-core` `ConnectionOptions`) for typing `servers`, `wsFactory`, etc.
+Exported types: `WsConnectionOptions`, `CoreConnectionOptions`.
 
 ## JetStream
 
-Import `createJetStream` from `@marz32one/otel-nats/jetstream`. Under the hood this uses [`jetstream()`](https://github.com/nats-io/nats.js/tree/main/jetstream) from `@nats-io/jetstream` with a TCP connection from `connect()`.
+```typescript
+import { connect, getMessageTraceContext } from '@marz32one/otel-nats';
+import { createJetStream, getJetStreamMessageTraceContext } from '@marz32one/otel-nats/jetstream';
+
+const conn = await connect({ servers: 'nats://127.0.0.1:4222' });
+const js = createJetStream(conn);
+
+await js.publish('orders.created', data, { otelContext: ctx });
+
+const c = await js.consumers.get('ORDERS', 'processor');
+const iter = await c.consume();
+for await (const msg of iter) {
+  const otelCtx = getJetStreamMessageTraceContext(msg);
+  msg.ack();
+  break;
+}
+await iter.close();
+```
+
+`JetStream` forwards **`streams`**, **`apiPrefix`**, **`getOptions`**, **`jetstreamManager`**, and **`startBatch`** to the underlying `JetStreamClient` (batch path is not individually traced).
 
 ## License
 

@@ -2,7 +2,7 @@ import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals
 import { ROOT_CONTEXT, SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
 import { headers as natsHeaders } from '@nats-io/transport-node';
 import type { Msg, NatsConnection, Subscription } from '@nats-io/transport-node';
-import { OtelNatsConn } from '../src/index.js';
+import { OtelNatsConn, getMessageTraceContext } from '../src/index.js';
 import { natsHeaderSetter } from '../src/carrier.js';
 import { setupOTel } from './helpers.js';
 
@@ -33,7 +33,9 @@ function makeMockNc(opts?: {
   requestRejects?: Error;
 }): { nc: NatsConnection; publishSpy: jest.Mock } {
   const publishSpy = opts?.publishThrows
-    ? (jest.fn().mockImplementation(() => { throw new Error('connection closed'); }) as jest.Mock)
+    ? (jest.fn().mockImplementation(() => {
+        throw new Error('connection closed');
+      }) as jest.Mock)
     : (jest.fn() as jest.Mock);
 
   const nc = {
@@ -49,6 +51,14 @@ function makeMockNc(opts?: {
         }),
     drain: (jest.fn() as jest.Mock).mockResolvedValue(undefined),
     close: (jest.fn() as jest.Mock).mockResolvedValue(undefined),
+    closed: (jest.fn() as jest.Mock).mockResolvedValue(undefined),
+    flush: (jest.fn() as jest.Mock).mockResolvedValue(undefined),
+    isClosed: jest.fn().mockReturnValue(false),
+    isDraining: jest.fn().mockReturnValue(false),
+    status: jest.fn(),
+    stats: jest.fn().mockReturnValue({ inBytes: 0, outBytes: 0, inMsgs: 0, outMsgs: 0 }),
+    rtt: (jest.fn() as jest.Mock).mockResolvedValue(1),
+    reconnect: (jest.fn() as jest.Mock).mockResolvedValue(undefined),
   } as unknown as NatsConnection;
 
   return { nc, publishSpy };
@@ -75,7 +85,7 @@ describe('OtelNatsConn (unit — mocked NatsConnection)', () => {
     const { nc } = makeMockNc();
     const conn = new OtelNatsConn(nc);
 
-    conn.publish(ROOT_CONTEXT, 'orders.new', enc.encode('hello'));
+    conn.publish('orders.new', enc.encode('hello'), { otelContext: ROOT_CONTEXT });
 
     const spans = otel.exporter.getFinishedSpans();
     expect(spans).toHaveLength(1);
@@ -95,7 +105,7 @@ describe('OtelNatsConn (unit — mocked NatsConnection)', () => {
     const { nc } = makeMockNc();
     const conn = new OtelNatsConn(nc);
 
-    conn.publish(ROOT_CONTEXT, 'ping');
+    conn.publish('ping', undefined, { otelContext: ROOT_CONTEXT });
 
     const span = otel.exporter.getFinishedSpans()[0];
     expect(span.attributes['messaging.message.body.size']).toBeUndefined();
@@ -108,7 +118,7 @@ describe('OtelNatsConn (unit — mocked NatsConnection)', () => {
     const tracer = otel.provider.getTracer('test');
     const parentSpan = tracer.startSpan('parent', {}, ROOT_CONTEXT);
     const parentCtx = trace.setSpan(ROOT_CONTEXT, parentSpan);
-    conn.publish(parentCtx, 'orders.new', enc.encode('hi'));
+    conn.publish('orders.new', enc.encode('hi'), { otelContext: parentCtx });
     parentSpan.end();
 
     expect(publishSpy).toHaveBeenCalledTimes(1);
@@ -122,11 +132,21 @@ describe('OtelNatsConn (unit — mocked NatsConnection)', () => {
     const { nc } = makeMockNc({ publishThrows: true });
     const conn = new OtelNatsConn(nc);
 
-    expect(() => conn.publish(ROOT_CONTEXT, 'err.subject', enc.encode('x'))).toThrow();
+    expect(() => conn.publish('err.subject', enc.encode('x'), { otelContext: ROOT_CONTEXT })).toThrow();
 
     const span = otel.exporter.getFinishedSpans().find((s) => s.name === 'err.subject send');
     expect(span?.status.code).toBe(SpanStatusCode.ERROR);
     expect(span?.events.some((e) => e.name === 'exception')).toBe(true);
+  });
+
+  it('publish forwards default traceDestination from instrumentation options', () => {
+    const { nc, publishSpy } = makeMockNc();
+    const conn = new OtelNatsConn(nc, { traceDestination: 'otel.trace' });
+
+    conn.publish('subj', enc.encode('x'), { otelContext: ROOT_CONTEXT });
+
+    const opts = publishSpy.mock.calls[0][2] as { traceDestination?: string };
+    expect(opts.traceDestination).toBe('otel.trace');
   });
 
   // ── subscribe ─────────────────────────────────────────────────────────────
@@ -137,7 +157,8 @@ describe('OtelNatsConn (unit — mocked NatsConnection)', () => {
     });
     const conn = new OtelNatsConn(nc);
 
-    for await (const _ of conn.subscribe('orders.new')) break;
+    const sub = conn.subscribe('orders.new');
+    for await (const _msg of sub) break;
 
     const span = otel.exporter.getFinishedSpans().find((s) => s.name === 'orders.new process');
     expect(span).toBeDefined();
@@ -154,7 +175,6 @@ describe('OtelNatsConn (unit — mocked NatsConnection)', () => {
     const producerCtx = trace.setSpan(ROOT_CONTEXT, producerSpan);
     producerSpan.end();
 
-    // Build headers carrying the producer trace context
     const { propagation } = await import('@opentelemetry/api');
     const hdrs = natsHeaders();
     propagation.inject(producerCtx, hdrs, natsHeaderSetter);
@@ -164,15 +184,14 @@ describe('OtelNatsConn (unit — mocked NatsConnection)', () => {
     });
     const conn = new OtelNatsConn(nc);
 
-    for await (const _ of conn.subscribe('orders.new')) break;
+    const sub = conn.subscribe('orders.new');
+    for await (const _msg of sub) break;
 
     const producerSpanCtx = producerSpan.spanContext();
     const consumerSpan = otel.exporter.getFinishedSpans().find((s) => s.name === 'orders.new process');
 
     expect(consumerSpan).toBeDefined();
-    // Must NOT be a child of producer
     expect(consumerSpan?.parentSpanId).not.toBe(producerSpanCtx.spanId);
-    // Must carry a link to the producer
     expect(consumerSpan?.links).toHaveLength(1);
     expect(consumerSpan?.links[0].context.traceId).toBe(producerSpanCtx.traceId);
     expect(consumerSpan?.links[0].context.spanId).toBe(producerSpanCtx.spanId);
@@ -184,7 +203,8 @@ describe('OtelNatsConn (unit — mocked NatsConnection)', () => {
     });
     const conn = new OtelNatsConn(nc);
 
-    for await (const _ of conn.subscribe('raw')) break;
+    const sub = conn.subscribe('raw');
+    for await (const _msg of sub) break;
 
     const span = otel.exporter.getFinishedSpans().find((s) => s.name === 'raw process');
     expect(span?.links).toHaveLength(0);
@@ -196,27 +216,27 @@ describe('OtelNatsConn (unit — mocked NatsConnection)', () => {
     });
     const conn = new OtelNatsConn(nc);
 
-    for await (const _ of conn.subscribe('q', { queue: 'workers' })) break;
+    const sub = conn.subscribe('q', { queue: 'workers' });
+    for await (const _msg of sub) break;
 
     const span = otel.exporter.getFinishedSpans().find((s) => s.name === 'q process');
     expect(span?.attributes['messaging.consumer.group.name']).toBe('workers');
   });
 
-  it('subscribe yields ctx so child spans can be linked', async () => {
+  it('getMessageTraceContext returns ctx for subscribe iterator deliveries', async () => {
     const { nc } = makeMockNc({
       subMessages: [{ subject: 'ctx.test', data: enc.encode('x'), headers: undefined }],
     });
     const conn = new OtelNatsConn(nc);
 
-    let yieldedCtx: import('@opentelemetry/api').Context | undefined;
-    for await (const { ctx } of conn.subscribe('ctx.test')) {
-      yieldedCtx = ctx;
+    const sub = conn.subscribe('ctx.test');
+    for await (const msg of sub) {
+      const yieldedCtx = getMessageTraceContext(msg);
+      expect(yieldedCtx).toBeDefined();
+      const sp = trace.getSpan(yieldedCtx!);
+      expect(sp).toBeDefined();
       break;
     }
-
-    expect(yieldedCtx).toBeDefined();
-    const sp = trace.getSpan(yieldedCtx!);
-    expect(sp).toBeDefined(); // active span in ctx is the consumer span
   });
 
   it('subscribe span ends before the next yield (both spans end)', async () => {
@@ -228,8 +248,9 @@ describe('OtelNatsConn (unit — mocked NatsConnection)', () => {
     });
     const conn = new OtelNatsConn(nc);
 
+    const sub = conn.subscribe('lifecycle');
     let count = 0;
-    for await (const _ of conn.subscribe('lifecycle')) {
+    for await (const _msg of sub) {
       if (++count >= 2) break;
     }
 
@@ -249,7 +270,10 @@ describe('OtelNatsConn (unit — mocked NatsConnection)', () => {
     const { nc } = makeMockNc({ requestResolves: enc.encode('pong') });
     const conn = new OtelNatsConn(nc);
 
-    const reply = await conn.request(ROOT_CONTEXT, 'rpc.ping', enc.encode('ping'));
+    const reply = await conn.request('rpc.ping', enc.encode('ping'), {
+      timeout: 5000,
+      otelContext: ROOT_CONTEXT,
+    });
 
     expect(dec.decode(reply.data)).toBe('pong');
 
@@ -257,6 +281,7 @@ describe('OtelNatsConn (unit — mocked NatsConnection)', () => {
     expect(span).toBeDefined();
     expect(span?.kind).toBe(SpanKind.PRODUCER);
     expect(span?.status.code).toBe(SpanStatusCode.OK);
+    expect(span?.attributes['messaging.message.body.size']).toBe(4);
   });
 
   it('request sets ERROR status when nc.request rejects', async () => {
@@ -264,7 +289,7 @@ describe('OtelNatsConn (unit — mocked NatsConnection)', () => {
     const conn = new OtelNatsConn(nc);
 
     await expect(
-      conn.request(ROOT_CONTEXT, 'rpc.timeout', enc.encode('x'), { timeout: 200 }),
+      conn.request('rpc.timeout', enc.encode('x'), { timeout: 200, otelContext: ROOT_CONTEXT }),
     ).rejects.toThrow('timeout');
 
     const span = otel.exporter.getFinishedSpans().find((s) => s.name === 'rpc.timeout send');

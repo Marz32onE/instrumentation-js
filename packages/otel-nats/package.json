@@ -1,6 +1,6 @@
 {
   "name": "@marz32one/otel-nats",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "NATS client OpenTelemetry trace propagation (W3C TraceContext; compatible with instrumentation-go/otel-nats)",
   "type": "module",
   "main": "./dist/index.js",
@@ -20,7 +20,8 @@
   },
   "files": [
     "dist/**/*",
-    "README.md"
+    "README.md",
+    "docs/**/*.md"
   ],
   "scripts": {
     "build": "tsc",

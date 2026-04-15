@@ -47,7 +47,7 @@ make test-integration   # runs packages/otel-nats integration suite via Docker
 
 ## CI
 
-`.github/workflows/ci.yml` runs on push/PR to `main` for any change in `packages/**/*.ts|js|cjs|mjs`, `package*.json`, `eslint.config.*`, `tsconfig*.json`, `Makefile`, or workflow files. Tested on Node 20 and 22. Steps: `install → lint → test → build`.
+`.github/workflows/ci.yml` runs on push/PR to `main` for any change in `packages/**/*.ts|js|cjs|mjs`, `package*.json`, `eslint.config.*`, `tsconfig*.json`, `Makefile`, or workflow files. Tested on Node 20 and 22 (matrix uses current `20.x` / `22.x` from `actions/setup-node`). The repo root `engines.node` matches ESLint 10 (`^20.19.0 || ^22.13.0 || >=24`); use a Node version that satisfies that range when running `make lint`. Steps: `install → lint → test → build`.
 
 Integration tests run in a separate job (`test-integration`) using Docker via testcontainers — requires Docker to be available.
 
@@ -96,14 +96,15 @@ When inactive: payloads pass through unchanged, spans are still created.
 
 ### otel-nats
 
-- `OtelNatsConn` wraps `NatsConnection` (TCP via `@nats-io/transport-node`); `wsconnect()` lazily imports `@nats-io/nats-core` for browser/WebSocket connections
-- `publish()` — synchronous PRODUCER span, injects W3C headers into `MsgHdrs`
-- `subscribe()` — async generator yielding `{ msg, ctx }` with a CONSUMER span per message
-- `request()` — PRODUCER span for request-reply
-- `JetStream` (in `./jetstream` export) — `publish()`, `consumer().messages()` (async generator, `lastSpan` pattern), `consumer().fetch()` (batch, point-in-time spans)
-- `natsHeaderGetter` / `natsHeaderSetter` — `TextMapGetter`/`TextMapSetter` for `MsgHdrs`; maps empty string to `undefined` since `MsgHdrsImpl.get()` returns `""` for absent keys
-- `NatsInstrumentationOptions` — optional `tracerProvider` and `propagators` overrides; resolves global on each call so tests can swap globals between cases
-- Span names follow Go instrumentation convention: `"{subject} send"` / `"{subject} process"` / `"{subject} receive"`
+- `OtelNatsConn` mirrors `NatsConnection` (TCP via `@nats-io/transport-node`): `publish` / `publishMessage` / `respondMessage` / `subscribe` / `request` / `requestMany` are wrapped for tracing; other methods (`flush`, `stats`, `status`, …) delegate to the underlying connection
+- `publish(subject, payload?, options?)` — optional `otelContext` and `traceDestination` in options; injects W3C headers (PRODUCER span)
+- `subscribe` — returns upstream `Subscription`; use `getMessageTraceContext(msg)` for the consumer `Context` (lastSpan pattern on async iterator)
+- `request` / `requestMany` — optional `otelContext`; reply body size on `request` span when successful
+- `JetStream` (`./jetstream`) — `publish` with `otelContext` / `traceDestination`; `consumers.get` / `getPushConsumer` / `getBoundPushConsumer` / `getConsumerFromInfo` return `OtelConsumer` / `OtelPushConsumer`; `consume` / `fetch` wrap `ConsumerMessages` (lastSpan for iterator); `next` is point-in-time; `streams` / `startBatch` / `jetstreamManager` delegate
+- `getMessageTraceContext` / `getJetStreamMessageTraceContext` — read trace `Context` from delivered messages
+- `natsHeaderGetter` / `natsHeaderSetter` — `MsgHdrs` carrier; empty string → `undefined` for absent keys
+- `NatsInstrumentationOptions` — `tracerProvider`, `propagators`, optional default `traceDestination`
+- Span names: `"{subject} send"` / `"{subject} process"` / `"{subject} receive"` (JetStream uses message subject where applicable)
 - `@nats-io/jetstream` and `@nats-io/nats-core` are optional peer dependencies
 
 ### Span Attributes
