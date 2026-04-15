@@ -105,13 +105,13 @@ function createFallbackCtor(OrigCtor: new (...a: unknown[]) => WsLike) {
     }
 
     private _connect(protocols?: string | string[]) {
-      const ws = (protocols?.length
+      const ws = protocols?.length
         ? new OrigCtor(this._url, protocols)
-        : new OrigCtor(this._url)) as WsLike;
+        : new OrigCtor(this._url);
       this._ws = ws;
 
       ws.onopen    = (e) => { this._opened = true; this._h.onopen?.call(ws, e); };
-      ws.onmessage = (e) => this._h.onmessage?.call(ws, e as MessageEvent);
+      ws.onmessage = (e) => this._h.onmessage?.call(ws, e);
       ws.onerror   = (e) => {
         if (!this._opened && !this._retried) {
           // Pre-open error: suppress so RxJS does not error the observable before
@@ -128,7 +128,7 @@ function createFallbackCtor(OrigCtor: new (...a: unknown[]) => WsLike) {
           this._connect();
           return;
         }
-        this._h.onclose?.call(ws, e as CloseEvent);
+        this._h.onclose?.call(ws, e);
       };
     }
 
