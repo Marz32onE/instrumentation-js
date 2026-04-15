@@ -1,6 +1,6 @@
 {
   "name": "@marz32one/otel-nats",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "NATS client OpenTelemetry trace propagation (W3C TraceContext; compatible with instrumentation-go/otel-nats)",
   "type": "module",
   "main": "./dist/index.js",
@@ -16,11 +16,22 @@
       "types": "./dist/jetstream.d.ts",
       "import": "./dist/jetstream.js",
       "default": "./dist/jetstream.js"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js",
+      "default": "./dist/browser.js"
+    },
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "import": "./dist/core.js",
+      "default": "./dist/core.js"
     }
   },
   "files": [
     "dist/**/*",
-    "README.md"
+    "README.md",
+    "docs/**/*.md"
   ],
   "scripts": {
     "build": "tsc",
@@ -42,7 +53,7 @@
   "author": "Marz32onE",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "peerDependencies": {
     "@nats-io/jetstream": "^3.3.0",
@@ -54,7 +65,7 @@
     "@nats-io/jetstream": {
       "optional": true
     },
-    "@nats-io/nats-core": {
+    "@nats-io/transport-node": {
       "optional": true
     }
   },
@@ -63,15 +74,15 @@
     "@nats-io/nats-core": "^3.3.1",
     "@nats-io/transport-node": "^3.3.1",
     "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/core": "^1.30.1",
-    "@opentelemetry/sdk-trace-node": "^1.30.1",
-    "@types/jest": "^29.5.14",
+    "@opentelemetry/core": "^2.6.0",
+    "@opentelemetry/sdk-trace-node": "^2.6.0",
+    "@types/jest": "^30.0.0",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
-    "jest": "^29.7.0",
+    "jest": "^30.0.0",
     "testcontainers": "^11.14.0",
-    "ts-jest": "^29.4.0",
-    "typescript": "^5.7.0",
+    "ts-jest": "^29.4.9",
+    "typescript": "^6.0.0",
     "ws": "^8.20.0"
   }
 }

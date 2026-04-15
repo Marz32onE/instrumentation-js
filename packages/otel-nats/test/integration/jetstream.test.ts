@@ -1,3 +1,8 @@
+/**
+ * Mirrors `@nats-io/jetstream` README: `jetstreamManager(nc)`, `jetstream(nc)`,
+ * `js.publish`, `js.consumers.get` + `consume` / `fetch`. Use `connect` from
+ * `@marz32one/otel-nats` and `createJetStream(conn)` instead of `jetstream(nc)`.
+ */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from '@jest/globals';
 import { ROOT_CONTEXT } from '@opentelemetry/api';
 import { jetstreamManager } from '@nats-io/jetstream';
@@ -45,16 +50,18 @@ describe('[integration] JetStream', () => {
     const jsm = await jetstreamManager(conn.natsConn());
     await jsm.consumers.add(STREAM, { durable_name: 'it-consumer', filter_subject: 'it.js.e2e' });
 
-    await js.publish(ROOT_CONTEXT, 'it.js.e2e', enc.encode('payload'));
+    await js.publish('it.js.e2e', enc.encode('payload'), { otelContext: ROOT_CONTEXT });
 
-    const consumer = await js.consumer(STREAM, 'it-consumer');
+    const consumer = await js.consumers.get(STREAM, 'it-consumer');
     let receivedTraceparent: string | undefined;
 
-    for await (const { msg } of consumer.messages()) {
+    const iter = await consumer.consume();
+    for await (const msg of iter) {
       receivedTraceparent = msg.headers?.get('traceparent');
       msg.ack();
       break;
     }
+    await iter.close();
 
     await conn.drain();
 
@@ -77,11 +84,12 @@ describe('[integration] JetStream', () => {
     const jsm = await jetstreamManager(conn.natsConn());
     await jsm.consumers.add(STREAM, { durable_name: 'it-fetcher', filter_subject: 'it.js.fetch' });
 
-    await js.publish(ROOT_CONTEXT, 'it.js.fetch', enc.encode('x'));
+    await js.publish('it.js.fetch', enc.encode('x'), { otelContext: ROOT_CONTEXT });
 
-    const consumer = await js.consumer(STREAM, 'it-fetcher');
-    const results = await consumer.fetch(1);
-    for (const { msg } of results) msg.ack();
+    const consumer = await js.consumers.get(STREAM, 'it-fetcher');
+    const fetchIter = await consumer.fetch({ max_messages: 1 });
+    for await (const msg of fetchIter) msg.ack();
+    await fetchIter.close();
 
     await conn.drain();
 

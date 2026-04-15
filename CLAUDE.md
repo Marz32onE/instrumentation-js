@@ -37,22 +37,19 @@ NODE_OPTIONS=--experimental-vm-modules npx jest test/core.test.ts
 
 ## Test Prerequisites
 
-`packages/otel-nats` tests spin up a real `nats-server` process. It must be in `PATH`:
+Unit tests (`make test`) use mocked connections — no external process required.
+
+Integration tests (`make test-integration`) use testcontainers to spin up a NATS server in Docker. Docker must be running:
 
 ```bash
-brew install nats-server
-```
-
-To skip spawning and point tests at an existing server:
-
-```bash
-NATS_URL=nats://127.0.0.1:4222 npm run test      # TCP tests
-NATS_WS_URL=ws://127.0.0.1:9222 npm run test     # WebSocket tests (requires NATS_URL too)
+make test-integration   # runs packages/otel-nats integration suite via Docker
 ```
 
 ## CI
 
-`.github/workflows/ci.yml` runs on push/PR to `main` for any change in `packages/**/*.ts|js|cjs|mjs`, `package*.json`, `eslint.config.*`, `tsconfig*.json`, `Makefile`, or workflow files. Tested on Node 18 and 20. Steps: `install → lint → test → build`.
+`.github/workflows/ci.yml` runs on push/PR to `main` for any change in `packages/**/*.ts|js|cjs|mjs`, `package*.json`, `eslint.config.*`, `tsconfig*.json`, `Makefile`, or workflow files. Tested on Node 20 and 22 (matrix uses current `20.x` / `22.x` from `actions/setup-node`). The repo root `engines.node` matches ESLint 10 (`^20.19.0 || ^22.13.0 || >=24`); use a Node version that satisfies that range when running `make lint`. Steps: `install → lint → test → build`.
+
+Integration tests run in a separate job (`test-integration`) using Docker via testcontainers — requires Docker to be available.
 
 ## Wire Protocol (otel-ws / otel-rxjs-ws)
 
@@ -99,14 +96,15 @@ When inactive: payloads pass through unchanged, spans are still created.
 
 ### otel-nats
 
-- `OtelNatsConn` wraps `NatsConnection` (TCP via `@nats-io/transport-node`); `wsconnect()` lazily imports `@nats-io/nats-core` for browser/WebSocket connections
-- `publish()` — synchronous PRODUCER span, injects W3C headers into `MsgHdrs`
-- `subscribe()` — async generator yielding `{ msg, ctx }` with a CONSUMER span per message
-- `request()` — PRODUCER span for request-reply
-- `JetStream` (in `./jetstream` export) — `publish()`, `consumer().messages()` (async generator, `lastSpan` pattern), `consumer().fetch()` (batch, point-in-time spans)
-- `natsHeaderGetter` / `natsHeaderSetter` — `TextMapGetter`/`TextMapSetter` for `MsgHdrs`; maps empty string to `undefined` since `MsgHdrsImpl.get()` returns `""` for absent keys
-- `NatsInstrumentationOptions` — optional `tracerProvider` and `propagators` overrides; resolves global on each call so tests can swap globals between cases
-- Span names follow Go instrumentation convention: `"{subject} send"` / `"{subject} process"` / `"{subject} receive"`
+- `OtelNatsConn` mirrors `NatsConnection` (TCP via `@nats-io/transport-node`): `publish` / `publishMessage` / `respondMessage` / `subscribe` / `request` / `requestMany` are wrapped for tracing; other methods (`flush`, `stats`, `status`, …) delegate to the underlying connection
+- `publish(subject, payload?, options?)` — optional `otelContext` and `traceDestination` in options; injects W3C headers (PRODUCER span)
+- `subscribe` — returns upstream `Subscription`; use `getMessageTraceContext(msg)` for the consumer `Context` (lastSpan pattern on async iterator)
+- `request` / `requestMany` — optional `otelContext`; reply body size on `request` span when successful
+- `JetStream` (`./jetstream`) — `publish` with `otelContext` / `traceDestination`; `consumers.get` / `getPushConsumer` / `getBoundPushConsumer` / `getConsumerFromInfo` return `OtelConsumer` / `OtelPushConsumer`; `consume` / `fetch` wrap `ConsumerMessages` (lastSpan for iterator); `next` is point-in-time; `streams` / `startBatch` / `jetstreamManager` delegate
+- `getMessageTraceContext` / `getJetStreamMessageTraceContext` — read trace `Context` from delivered messages
+- `natsHeaderGetter` / `natsHeaderSetter` — `MsgHdrs` carrier; empty string → `undefined` for absent keys
+- `NatsInstrumentationOptions` — `tracerProvider`, `propagators`, optional default `traceDestination`
+- Span names: `"{subject} send"` / `"{subject} process"` / `"{subject} receive"` (JetStream uses message subject where applicable)
 - `@nats-io/jetstream` and `@nats-io/nats-core` are optional peer dependencies
 
 ### Span Attributes
@@ -153,11 +151,14 @@ Tests spin up a real `ws` server (otel-ws/otel-rxjs-ws) or a real `nats-server` 
 - `packages/otel-nats/src/carrier.ts` — `natsHeaderGetter` / `natsHeaderSetter`
 - `packages/otel-nats/src/attributes.ts` — `publishAttrs()` / `receiveAttrs()`
 - `packages/otel-nats/test/helpers.ts` — `setupOTel()`, `startNatsServer()`, `startNatsServerWithWebSocket()`
-- `tsconfig.base.json` — shared TypeScript config (ES2020, NodeNext, strict)
+- `tsconfig.base.json` — shared TypeScript config (ES2022, NodeNext, strict)
 - `eslint.config.mjs` — flat ESLint config with `typescript-eslint` recommended type-checked
 
 ## Dependency Notes
 
 - `otel-ws` pins `ws` at `5.1.1` (not a range) — binary frame patching is sensitive to ws internals
-- `otel-rxjs-ws` dev deps use `@opentelemetry/sdk-trace-node ^2.6.0` (newer major than otel-ws at `^1.30.1`) — intentional
+- All packages use `@opentelemetry/sdk-trace-node ^2.6.0` and `typescript ^6.0.0`
+- TypeScript 6 requires `"types": ["node"]` in each package tsconfig — added to all tsconfigs
+- ESLint 10 requires Node **20.19.0+** (not just any Node 20.x)
+- `@typescript-eslint/no-unsafe-call` and `no-unsafe-member-access` are disabled in test files — `@types/jest` v30 uses conditional types that typescript-eslint 8 cannot resolve
 - `otel-nats` requires `@nats-io/transport-node` peer; `@nats-io/jetstream` and `@nats-io/nats-core` are optional peers

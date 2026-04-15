@@ -8,6 +8,11 @@ import {
 export interface NatsInstrumentationOptions {
   tracerProvider?: TracerProvider;
   propagators?: TextMapPropagator;
+  /**
+   * Default `traceDestination` for publishes when not set per-call (NATS server 2.11+ message tracing).
+   * Merged into {@link PublishOptions.traceDestination} for core and JetStream publishes.
+   */
+  traceDestination?: string;
 }
 
 export function resolveTracerProvider(opts?: NatsInstrumentationOptions): TracerProvider {

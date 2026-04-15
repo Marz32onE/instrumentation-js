@@ -67,6 +67,9 @@ jobs:
 
   test-integration:
     runs-on: ubuntu-latest
+    # Ryuk log-wait can fail on some runners; NATS containers still stop when tests finish (ephemeral VM).
+    env:
+      TESTCONTAINERS_RYUK_DISABLED: 'true'
     steps:
       - uses: actions/checkout@v4
 

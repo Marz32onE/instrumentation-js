@@ -1,3 +1,7 @@
+/**
+ * WebSocket transport: same shape as nats.js `connect` over WS; here `wsconnect`
+ * from `@marz32one/otel-nats` with `wsFactory` (see `@nats-io/nats-core` / transport docs).
+ */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from '@jest/globals';
 import { ROOT_CONTEXT } from '@opentelemetry/api';
 import Ws from 'ws';
@@ -41,13 +45,13 @@ describe('[integration] WebSocket (wsconnect)', () => {
     const subj = 'integration.ws.traceheaders';
     const readFirst = (async () => {
       const gen = conn.subscribe(subj);
-      for await (const { msg } of gen) {
+      for await (const msg of gen) {
         return msg;
       }
       return undefined;
     })();
 
-    conn.publish(ROOT_CONTEXT, subj, enc.encode('payload'));
+    conn.publish(subj, enc.encode('payload'), { otelContext: ROOT_CONTEXT });
 
     const msg = await readFirst;
     await conn.drain();

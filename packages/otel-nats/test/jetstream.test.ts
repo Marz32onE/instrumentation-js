@@ -11,12 +11,22 @@ import type { NatsConnection } from '@nats-io/transport-node';
 const mockJsPublish = jest.fn<() => Promise<PubAck>>();
 const mockConsume = jest.fn();
 const mockFetch = jest.fn();
-const mockConsumersGet = jest.fn<() => Promise<{ consume: typeof mockConsume; fetch: typeof mockFetch }>>();
+const mockNext = jest.fn();
+const mockConsumersGet = jest.fn();
 
 jest.unstable_mockModule('@nats-io/jetstream', () => ({
   jetstream: jest.fn(() => ({
     publish: mockJsPublish,
-    consumers: { get: mockConsumersGet },
+    consumers: {
+      get: mockConsumersGet,
+      getConsumerFromInfo: jest.fn(),
+      getPushConsumer: jest.fn(),
+      getBoundPushConsumer: jest.fn(),
+    },
+    streams: {},
+    apiPrefix: '',
+    getOptions: jest.fn(),
+    jetstreamManager: jest.fn(),
   })),
 }));
 
@@ -39,20 +49,19 @@ function makeJsMsg(subject: string, data = enc.encode('payload'), hdrs?: ReturnT
   return { subject, data, headers: hdrs, ack: jest.fn() };
 }
 
-/** Returns an async iterable + close() that yields the provided messages. */
-function makeConsumeIter(messages: MockJsMsg[]) {
+function makeConsumerMessages(messages: MockJsMsg[]) {
   return {
     close: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
-    async *[Symbol.asyncIterator]() {
-      for (const m of messages) yield m as unknown as JsMsg;
-    },
-  };
-}
-
-/** Returns an async iterable + close() for consumer.fetch(). */
-function makeFetchIter(messages: MockJsMsg[]) {
-  return {
-    close: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+    closed: jest.fn<() => Promise<void | Error>>().mockResolvedValue(undefined),
+    status: jest.fn().mockReturnValue(
+      (async function* () {
+        /* empty */
+      })(),
+    ),
+    stop: jest.fn(),
+    getProcessed: jest.fn().mockReturnValue(0),
+    getPending: jest.fn().mockReturnValue(0),
+    getReceived: jest.fn().mockReturnValue(0),
     async *[Symbol.asyncIterator]() {
       for (const m of messages) yield m as unknown as JsMsg;
     },
@@ -70,6 +79,16 @@ function makeMockNc(): NatsConnection {
   } as unknown as NatsConnection;
 }
 
+const mockPullConsumer = {
+  consume: mockConsume,
+  fetch: mockFetch,
+  next: mockNext,
+  info: jest.fn(),
+  delete: jest.fn(),
+  isPullConsumer: () => true,
+  isPushConsumer: () => false,
+};
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -80,6 +99,7 @@ describe('JetStream (unit — mocked @nats-io/jetstream)', () => {
   beforeEach(() => {
     otel = setupOTel();
     jest.clearAllMocks();
+    mockConsumersGet.mockResolvedValue(mockPullConsumer);
   });
 
   afterEach(async () => {
@@ -93,7 +113,7 @@ describe('JetStream (unit — mocked @nats-io/jetstream)', () => {
     const conn = new OtelNatsConn(makeMockNc());
     const js = createJetStream(conn);
 
-    await js.publish(ROOT_CONTEXT, 'orders.created', enc.encode('hello'));
+    await js.publish('orders.created', enc.encode('hello'), { otelContext: ROOT_CONTEXT });
 
     const span = otel.exporter.getFinishedSpans().find((s) => s.name === 'orders.created send');
     expect(span).toBeDefined();
@@ -109,7 +129,7 @@ describe('JetStream (unit — mocked @nats-io/jetstream)', () => {
     const conn = new OtelNatsConn(makeMockNc());
     const js = createJetStream(conn);
 
-    await js.publish(ROOT_CONTEXT, 'orders.created', enc.encode('data'));
+    await js.publish('orders.created', enc.encode('data'), { otelContext: ROOT_CONTEXT });
 
     expect(mockJsPublish).toHaveBeenCalledTimes(1);
     const callOpts = (mockJsPublish.mock.calls[0] as [string, Uint8Array, { headers: ReturnType<typeof natsHeaders> }])[2];
@@ -122,26 +142,29 @@ describe('JetStream (unit — mocked @nats-io/jetstream)', () => {
     const conn = new OtelNatsConn(makeMockNc());
     const js = createJetStream(conn);
 
-    await expect(js.publish(ROOT_CONTEXT, 'bad.subject', enc.encode('x'))).rejects.toThrow('stream not found');
+    await expect(js.publish('bad.subject', enc.encode('x'), { otelContext: ROOT_CONTEXT })).rejects.toThrow(
+      'stream not found',
+    );
 
     const span = otel.exporter.getFinishedSpans().find((s) => s.name === 'bad.subject send');
     expect(span?.status.code).toBe(SpanStatusCode.ERROR);
     expect(span?.events.some((e) => e.name === 'exception')).toBe(true);
   });
 
-  // ── consumer.messages() ───────────────────────────────────────────────────
+  // ── consumer.consume() ───────────────────────────────────────────────────
 
-  it('consumer.messages() creates a CONSUMER span with correct attributes', async () => {
-    mockConsumersGet.mockResolvedValue({ consume: mockConsume, fetch: mockFetch });
-    mockConsume.mockResolvedValue(makeConsumeIter([makeJsMsg('orders.created')]));
+  it('consumer.consume() iterator creates a CONSUMER span with correct attributes', async () => {
+    mockConsume.mockResolvedValue(makeConsumerMessages([makeJsMsg('orders.created')]));
     const conn = new OtelNatsConn(makeMockNc());
     const js = createJetStream(conn);
 
-    const consumer = await js.consumer('ORDERS', 'processor');
-    for await (const { msg } of consumer.messages()) {
+    const consumer = await js.consumers.get('ORDERS', 'processor');
+    const iter = await consumer.consume();
+    for await (const msg of iter) {
       msg.ack();
       break;
     }
+    await iter.close();
 
     const span = otel.exporter.getFinishedSpans().find((s) => s.name === 'orders.created receive');
     expect(span).toBeDefined();
@@ -151,7 +174,7 @@ describe('JetStream (unit — mocked @nats-io/jetstream)', () => {
     expect(span?.attributes['messaging.operation.type']).toBe('receive');
   });
 
-  it('consumer.messages() span has link to producer span', async () => {
+  it('consumer.consume() span has link to producer span', async () => {
     const tracer = otel.provider.getTracer('test');
     const producerSpan = tracer.startSpan('producer', { kind: SpanKind.PRODUCER }, ROOT_CONTEXT);
     const producerCtx = trace.setSpan(ROOT_CONTEXT, producerSpan);
@@ -160,42 +183,45 @@ describe('JetStream (unit — mocked @nats-io/jetstream)', () => {
     const hdrs = natsHeaders();
     propagation.inject(producerCtx, hdrs, natsHeaderSetter);
 
-    mockConsumersGet.mockResolvedValue({ consume: mockConsume, fetch: mockFetch });
-    mockConsume.mockResolvedValue(makeConsumeIter([makeJsMsg('orders.created', enc.encode('x'), hdrs)]));
+    mockConsume.mockResolvedValue(makeConsumerMessages([makeJsMsg('orders.created', enc.encode('x'), hdrs)]));
 
     const conn = new OtelNatsConn(makeMockNc());
     const js = createJetStream(conn);
-    const consumer = await js.consumer('ORDERS', 'processor');
+    const consumer = await js.consumers.get('ORDERS', 'processor');
 
-    for await (const { msg } of consumer.messages()) {
+    const iter = await consumer.consume();
+    for await (const msg of iter) {
       msg.ack();
       break;
     }
+    await iter.close();
 
     const consumerSpan = otel.exporter.getFinishedSpans().find((s) => s.name === 'orders.created receive');
     expect(consumerSpan?.links).toHaveLength(1);
     expect(consumerSpan?.links[0].context.traceId).toBe(producerSpan.spanContext().traceId);
     expect(consumerSpan?.links[0].context.spanId).toBe(producerSpan.spanContext().spanId);
-    // must not be a child
     expect(consumerSpan?.parentSpanId).not.toBe(producerSpan.spanContext().spanId);
   });
 
-  it('consumer.messages() ends span N before yielding message N+1 (lastSpan pattern)', async () => {
-    mockConsumersGet.mockResolvedValue({ consume: mockConsume, fetch: mockFetch });
-    mockConsume.mockResolvedValue(makeConsumeIter([
-      makeJsMsg('orders.created', enc.encode('a')),
-      makeJsMsg('orders.created', enc.encode('b')),
-    ]));
+  it('consumer.consume() ends span N before yielding message N+1 (lastSpan pattern)', async () => {
+    mockConsume.mockResolvedValue(
+      makeConsumerMessages([
+        makeJsMsg('orders.created', enc.encode('a')),
+        makeJsMsg('orders.created', enc.encode('b')),
+      ]),
+    );
 
     const conn = new OtelNatsConn(makeMockNc());
     const js = createJetStream(conn);
-    const consumer = await js.consumer('ORDERS', 'processor');
+    const consumer = await js.consumers.get('ORDERS', 'processor');
 
+    const iter = await consumer.consume();
     let count = 0;
-    for await (const { msg } of consumer.messages()) {
+    for await (const msg of iter) {
       msg.ack();
       if (++count >= 2) break;
     }
+    await iter.close();
 
     const spans = otel.exporter
       .getFinishedSpans()
@@ -208,20 +234,24 @@ describe('JetStream (unit — mocked @nats-io/jetstream)', () => {
 
   // ── consumer.fetch() ──────────────────────────────────────────────────────
 
-  it('consumer.fetch() returns array with immediately-ended CONSUMER spans', async () => {
-    mockConsumersGet.mockResolvedValue({ consume: mockConsume, fetch: mockFetch });
-    mockFetch.mockResolvedValue(makeFetchIter([
-      makeJsMsg('orders.created', enc.encode('x1')),
-      makeJsMsg('orders.created', enc.encode('x2')),
-      makeJsMsg('orders.created', enc.encode('x3')),
-    ]));
+  it('consumer.fetch() iterator creates immediately-ended CONSUMER spans per message', async () => {
+    mockFetch.mockResolvedValue(
+      makeConsumerMessages([
+        makeJsMsg('orders.created', enc.encode('x1')),
+        makeJsMsg('orders.created', enc.encode('x2')),
+        makeJsMsg('orders.created', enc.encode('x3')),
+      ]),
+    );
 
     const conn = new OtelNatsConn(makeMockNc());
     const js = createJetStream(conn);
-    const consumer = await js.consumer('ORDERS', 'fetcher');
-    const results = await consumer.fetch(3);
+    const consumer = await js.consumers.get('ORDERS', 'fetcher');
+    const iter = await consumer.fetch({ max_messages: 3 });
+    let n = 0;
+    for await (const _msg of iter) n++;
+    await iter.close();
 
-    expect(results).toHaveLength(3);
+    expect(n).toBe(3);
     const spans = otel.exporter
       .getFinishedSpans()
       .filter((s) => s.name === 'orders.created receive');
@@ -240,16 +270,35 @@ describe('JetStream (unit — mocked @nats-io/jetstream)', () => {
     const hdrs = natsHeaders();
     propagation.inject(producerCtx, hdrs, natsHeaderSetter);
 
-    mockConsumersGet.mockResolvedValue({ consume: mockConsume, fetch: mockFetch });
-    mockFetch.mockResolvedValue(makeFetchIter([makeJsMsg('orders.created', enc.encode('msg'), hdrs)]));
+    mockFetch.mockResolvedValue(makeConsumerMessages([makeJsMsg('orders.created', enc.encode('msg'), hdrs)]));
 
     const conn = new OtelNatsConn(makeMockNc());
     const js = createJetStream(conn);
-    const consumer = await js.consumer('ORDERS', 'fetcher');
-    await consumer.fetch(1);
+    const consumer = await js.consumers.get('ORDERS', 'fetcher');
+    const iter = await consumer.fetch({ max_messages: 1 });
+    for await (const _m of iter) {
+      /* one */
+    }
+    await iter.close();
 
     const consumerSpan = otel.exporter.getFinishedSpans().find((s) => s.name === 'orders.created receive');
     expect(consumerSpan?.links).toHaveLength(1);
     expect(consumerSpan?.links[0].context.traceId).toBe(producerSpan.spanContext().traceId);
+  });
+
+  // ── consumer.next() ─────────────────────────────────────────────────────────
+
+  it('consumer.next() creates a point-in-time CONSUMER span', async () => {
+    mockNext.mockResolvedValue(makeJsMsg('orders.created', enc.encode('one')));
+    const conn = new OtelNatsConn(makeMockNc());
+    const js = createJetStream(conn);
+    const consumer = await js.consumers.get('ORDERS', 'nexty');
+    const msg = await consumer.next();
+    expect(msg).not.toBeNull();
+    msg!.ack();
+
+    const span = otel.exporter.getFinishedSpans().find((s) => s.name === 'orders.created receive');
+    expect(span).toBeDefined();
+    expect(span?.endTime[0] * 1e9 + span!.endTime[1]).toBeGreaterThan(0);
   });
 });

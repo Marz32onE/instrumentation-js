@@ -1,4 +1,12 @@
-import { GenericContainer, type StartedTestContainer } from 'testcontainers';
+/**
+ * NATS via Testcontainers. Default GenericContainer wait is already port-based;
+ * we set `Wait.forListeningPorts()` explicitly so startup does not depend on image log wording.
+ *
+ * If tests fail with a log-wait error (log stream ended, expected line matching Ryuk "Started"), that
+ * usually indicates Ryuk (testcontainers reaper) could not start — fix Docker socket access,
+ * or set `TESTCONTAINERS_RYUK_DISABLED=true` (disables session-scoped cleanup; use with care).
+ */
+import { GenericContainer, Wait, type StartedTestContainer } from 'testcontainers';
 import {
   CompositePropagator,
   W3CBaggagePropagator,
@@ -29,6 +37,7 @@ export async function startNatsContainer(opts: { jetstream?: boolean } = {}): Pr
   const container = await new GenericContainer(NATS_IMAGE)
     .withCommand(cmd)
     .withExposedPorts(4222)
+    .withWaitStrategy(Wait.forListeningPorts())
     .start();
   const url = `nats://127.0.0.1:${container.getMappedPort(4222)}`;
   return { url, container, stop: () => container.stop() };
@@ -46,6 +55,7 @@ websocket {
     .withCopyContentToContainer([{ content: wsConfig, target: '/etc/nats.conf' }])
     .withCommand(['-c', '/etc/nats.conf'])
     .withExposedPorts(4222, 9222)
+    .withWaitStrategy(Wait.forListeningPorts())
     .start();
 
   const url = `nats://127.0.0.1:${container.getMappedPort(4222)}`;
