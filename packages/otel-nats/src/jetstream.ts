@@ -6,7 +6,7 @@ import {
   context as otelContext,
   trace,
 } from '@opentelemetry/api';
-import { headers as transportHeaders, type Payload } from '@nats-io/transport-node';
+import { headers as coreHeaders, type Payload } from '@nats-io/nats-core';
 import {
   jetstream as natsJetStream,
   type BoundPushConsumerOptions,
@@ -27,7 +27,7 @@ import {
   type PushConsumerOptions,
 } from '@nats-io/jetstream';
 
-import type { OtelNatsConn } from './index.js';
+import type { OtelNatsConn } from './core.js';
 import { natsHeaderSetter } from './carrier.js';
 import { publishAttrs } from './attributes.js';
 import {
@@ -273,7 +273,7 @@ export class JetStream {
       ctx,
     );
     const spanCtx = trace.setSpan(ctx, span);
-    const hdrs = rest.headers ?? transportHeaders();
+    const hdrs = rest.headers ?? coreHeaders();
     propagator.inject(spanCtx, hdrs, natsHeaderSetter);
 
     const traceDestination = tdOpt ?? this.#conn.defaultTraceDestination();

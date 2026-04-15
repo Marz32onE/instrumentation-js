@@ -16,6 +16,16 @@
       "types": "./dist/jetstream.d.ts",
       "import": "./dist/jetstream.js",
       "default": "./dist/jetstream.js"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js",
+      "default": "./dist/browser.js"
+    },
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "import": "./dist/core.js",
+      "default": "./dist/core.js"
     }
   },
   "files": [
@@ -55,7 +65,7 @@
     "@nats-io/jetstream": {
       "optional": true
     },
-    "@nats-io/nats-core": {
+    "@nats-io/transport-node": {
       "optional": true
     }
   },

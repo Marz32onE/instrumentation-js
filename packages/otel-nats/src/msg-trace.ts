@@ -1,5 +1,5 @@
 import type { Context } from '@opentelemetry/api';
-import type { Msg } from '@nats-io/transport-node';
+import type { Msg } from '@nats-io/nats-core';
 import type { JsMsg } from '@nats-io/jetstream';
 
 const coreMsgCtx = new WeakMap<Msg, Context>();
