@@ -27,6 +27,12 @@ By default (no `protocol` in config), the client offers `['otel-ws']` and automa
 
 Protocol activation is detected via the WebSocket `open` event. On close, pending context queues are cleared to prevent stale contexts from bleeding across reconnects.
 
+## Requirements
+
+- Node.js **>= 20**
+- `@opentelemetry/api` ^1.9.0
+- `rxjs` ^7.8.0
+
 ## Install
 
 ```bash

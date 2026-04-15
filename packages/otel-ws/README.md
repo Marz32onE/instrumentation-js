@@ -16,6 +16,11 @@ When negotiated, outgoing messages use an envelope:
 
 When not negotiated, payloads are **fully passthrough** (native `ws` behavior): no envelope injection/extraction and no payload shape changes. `websocket.send` / `websocket.receive` spans are still created.
 
+## Requirements
+
+- Node.js **>= 20**
+- `@opentelemetry/api` ^1.9.0
+
 ## Install
 
 ```bash

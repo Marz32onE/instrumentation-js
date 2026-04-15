@@ -4,6 +4,12 @@ OpenTelemetry trace propagation for NATS JavaScript clients: **W3C Trace Context
 
 **v1.x** aligns with [nats.js v3](https://github.com/nats-io/nats.js) modular packages (`@nats-io/transport-node`, `@nats-io/jetstream`, `@nats-io/nats-core`). If you used the legacy `nats` npm v2 client with `@marz32one/otel-nats` 0.x, upgrade your app to v3 clients and this package together.
 
+## Requirements
+
+- Node.js **>= 20**
+- `@opentelemetry/api` ^1.9.0
+- `@nats-io/transport-node` ^3.3.0 (required peer)
+
 ## Install
 
 ```bash
