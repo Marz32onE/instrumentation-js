@@ -88,6 +88,7 @@ function createFallbackCtor(OrigCtor: new (...a: unknown[]) => WsLike) {
     private _ws!: WsLike;
     private _opened = false;
     private _retried = false;
+    private _binaryType: BinaryType = 'blob';
     private readonly _url: string;
 
     // Handler storage shared across both WS instances so RxJS property
@@ -109,9 +110,10 @@ function createFallbackCtor(OrigCtor: new (...a: unknown[]) => WsLike) {
         ? new OrigCtor(this._url, protocols)
         : new OrigCtor(this._url);
       this._ws = ws;
+      ws.binaryType = this._binaryType;
 
-      ws.onopen    = (e) => { this._opened = true; this._h.onopen?.call(ws, e); };
-      ws.onmessage = (e) => this._h.onmessage?.call(ws, e);
+      ws.onopen    = (e) => { this._opened = true; this._h.onopen?.call(this, e); };
+      ws.onmessage = (e) => this._h.onmessage?.call(this, e);
       ws.onerror   = (e) => {
         if (!this._opened && !this._retried) {
           // Pre-open error: suppress so RxJS does not error the observable before
@@ -119,7 +121,7 @@ function createFallbackCtor(OrigCtor: new (...a: unknown[]) => WsLike) {
           // handler will forward the close to RxJS which errors it naturally.
           return;
         }
-        this._h.onerror?.call(ws, e);
+        this._h.onerror?.call(this, e);
       };
       ws.onclose   = (e) => {
         if (!this._opened && !this._retried) {
@@ -128,7 +130,7 @@ function createFallbackCtor(OrigCtor: new (...a: unknown[]) => WsLike) {
           this._connect();
           return;
         }
-        this._h.onclose?.call(ws, e);
+        this._h.onclose?.call(this, e);
       };
     }
 
@@ -145,8 +147,8 @@ function createFallbackCtor(OrigCtor: new (...a: unknown[]) => WsLike) {
     get url()            { return this._ws.url; }
     get bufferedAmount() { return this._ws.bufferedAmount; }
     get extensions()     { return this._ws.extensions; }
-    get binaryType()     { return this._ws.binaryType; }
-    set binaryType(v: BinaryType) { this._ws.binaryType = v; }
+    get binaryType()              { return this._binaryType; }
+    set binaryType(v: BinaryType) { this._binaryType = v; this._ws.binaryType = v; }
 
     send(d: Parameters<WsLike['send']>[0])       { this._ws.send(d); }
     close(code?: number, reason?: string)         { this._ws.close(code, reason); }
