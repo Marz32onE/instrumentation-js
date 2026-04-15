@@ -36,6 +36,7 @@ import {
 } from './options.js';
 import { version } from './version.js';
 import { setCoreMessageTraceContext } from './msg-trace.js';
+import { natsTracingEnabled } from './env-flags.js';
 
 export type { NatsInstrumentationOptions };
 export { natsHeaderGetter, natsHeaderSetter } from './carrier.js';
@@ -149,6 +150,7 @@ export class OtelNatsConn {
   readonly #traceOpts: NatsInstrumentationOptions | undefined;
   readonly #createHeaders: () => MsgHdrs;
   readonly #serverAddress: string;
+  readonly #tracingEnabled: boolean;
 
   constructor(
     nc: NatsConnection,
@@ -159,6 +161,7 @@ export class OtelNatsConn {
     this.#traceOpts = traceOpts;
     this.#createHeaders = createHeaders ?? (() => natsHeaders());
     this.#serverAddress = OtelNatsConn.#parseServerAddress(nc);
+    this.#tracingEnabled = natsTracingEnabled();
   }
 
   static #parseServerAddress(nc: NatsConnection): string {
@@ -279,6 +282,10 @@ export class OtelNatsConn {
     options?: PublishOptions & OtelContextMixin,
   ): void {
     const { otelContext: oc, ...publishRest } = options ?? {};
+    if (!this.#tracingEnabled) {
+      this.#nc.publish(subject, payload, publishRest);
+      return;
+    }
     const ctx = oc ?? otelContext.active();
     const { tracer, propagator } = this.traceContext();
     const serverAddress = this.serverAddress();
@@ -319,6 +326,10 @@ export class OtelNatsConn {
    * Publish using a full `Msg` (same as {@link NatsConnection.publishMessage}).
    */
   publishMessage(msg: Msg, options?: OtelContextMixin): void {
+    if (!this.#tracingEnabled) {
+      this.#nc.publishMessage(msg);
+      return;
+    }
     const ctx = options?.otelContext ?? otelContext.active();
     if (!msg.headers) {
       (msg as { headers: MsgHdrs }).headers = this.#createHeaders();
@@ -358,6 +369,7 @@ export class OtelNatsConn {
    */
   respondMessage(msg: Msg, options?: OtelContextMixin): boolean {
     if (!msg.reply) return this.#nc.respondMessage(msg);
+    if (!this.#tracingEnabled) return this.#nc.respondMessage(msg);
     const ctx = options?.otelContext ?? otelContext.active();
     if (!msg.headers) {
       (msg as { headers: MsgHdrs }).headers = this.#createHeaders();
@@ -393,6 +405,7 @@ export class OtelNatsConn {
    * Use {@link getMessageTraceContext} to read the context for a delivered `Msg`.
    */
   subscribe(subject: string, opts?: SubscriptionOptions): Subscription {
+    if (!this.#tracingEnabled) return this.#nc.subscribe(subject, opts);
     if (opts?.callback) {
       const userCb = opts.callback;
       return this.#nc.subscribe(subject, {
@@ -423,6 +436,7 @@ export class OtelNatsConn {
     opts?: RequestOptions & OtelContextMixin,
   ): Promise<Msg> {
     const { otelContext: oc, ...reqRest } = opts ?? ({} as RequestOptions & OtelContextMixin);
+    if (!this.#tracingEnabled) return this.#nc.request(subject, payload, reqRest as RequestOptions);
     const ctx = oc ?? otelContext.active();
     const { tracer, propagator } = this.traceContext();
     const serverAddress = this.serverAddress();
@@ -473,6 +487,7 @@ export class OtelNatsConn {
     opts?: Partial<RequestManyOptions> & OtelContextMixin,
   ): Promise<AsyncIterable<Msg>> {
     const { otelContext: oc, ...rmRest } = opts ?? {};
+    if (!this.#tracingEnabled) return this.#nc.requestMany(subject, payload, rmRest as RequestManyOptions);
     const ctx = oc ?? otelContext.active();
     const { tracer, propagator } = this.traceContext();
     const serverAddress = this.serverAddress();
