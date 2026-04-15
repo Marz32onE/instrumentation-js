@@ -312,6 +312,76 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     });
   });
 
+  describe('default otel-ws offer (no user protocol)', () => {
+    it('server accepts otel-ws → envelope mode active', async () => {
+      // Server explicitly selects 'otel-ws' via handleProtocols.
+      // With no user protocol configured, the client now offers ['otel-ws'] by default,
+      // so the connection should succeed in envelope mode.
+      const server = startEchoServer(true);
+      const ws = webSocket<{ body: string }>({
+        url: `ws://127.0.0.1:${server.port}`,
+        WebSocketCtor: WS_CTOR,
+        // No protocol specified — default offer ['otel-ws']
+      });
+
+      const msgPromise = firstValueFrom(ws.pipe(timeout(TEST_TIMEOUT)));
+      ws.subscribe();
+
+      const tracer = provider.getTracer('test');
+      const span = tracer.startSpan('parent', {}, ROOT_CONTEXT);
+      const ctx = trace.setSpan(ROOT_CONTEXT, span);
+
+      context.with(ctx, () => { ws.next({ body: 'default-otel' }); });
+
+      const received = await msgPromise;
+      expect(received).toEqual({ body: 'default-otel' });
+
+      // Trace ID must be preserved across the round-trip (envelope was active).
+      const spans = exporter.getFinishedSpans();
+      const recvSpan = spans.find((s) => s.name === 'websocket.receive');
+      expect(recvSpan?.spanContext().traceId).toBe(span.spanContext().traceId);
+
+      span.end();
+      ws.complete();
+      await server.close();
+    });
+
+    it('server rejects otel-ws → falls back to passthrough, spans still created', async () => {
+      // Server uses handleProtocols that returns false for any offered protocol.
+      // The client will fail the first attempt, then retry with no protocols → passthrough mode.
+      const wss = new WebSocketServer({
+        port: 0,
+        handleProtocols: () => false, // rejects every protocol offer
+      });
+      wss.on('connection', (sock) => {
+        sock.on('message', (data) => sock.send(data.toString()));
+      });
+      const { port } = wss.address() as import('net').AddressInfo;
+
+      const ws = webSocket<string>({
+        url: `ws://127.0.0.1:${port}`,
+        WebSocketCtor: WS_CTOR,
+        // No protocol specified — triggers default offer + fallback
+      });
+
+      const msgPromise = firstValueFrom(ws.pipe(timeout(TEST_TIMEOUT)));
+      const sub = ws.subscribe();
+      ws.next('fallback-msg');
+
+      const received = await msgPromise;
+      // Message passes through unchanged in passthrough mode (no envelope wrapping).
+      expect(received).toBe('fallback-msg');
+
+      const spans = exporter.getFinishedSpans();
+      expect(spans.some((s) => s.name === 'websocket.send')).toBeTruthy();
+      expect(spans.some((s) => s.name === 'websocket.receive')).toBeTruthy();
+
+      sub.unsubscribe();
+      ws.complete();
+      await new Promise<void>((r) => wss.close(() => r()));
+    });
+  });
+
   it('creates a CONSUMER span on receive', async () => {
     const msg = JSON.stringify({
       header: { traceparent: '00-12345678901234567890123456789012-0123456789012345-01' },
@@ -477,7 +547,10 @@ describe('webSocket (rxjs/webSocket compatible surface)', () => {
     await server.close();
   });
 
-  it('falls back to native deserializer when protocol is not negotiated', async () => {
+  it('envelope mode: non-envelope server message is delivered without trace context', async () => {
+    // Server has no handleProtocols → ws auto-selects the first offered protocol ('otel-ws').
+    // Connection enters envelope mode. Server sends a plain (non-envelope) JSON message;
+    // deserializeMessage handles it gracefully and returns the raw data unchanged.
     const server = startSendingServer(JSON.stringify({ plain: 'recv' }), false);
     const ws = webSocket<{ plain: string }>({
       url: `ws://127.0.0.1:${server.port}`,

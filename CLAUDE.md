@@ -95,6 +95,7 @@ When inactive: payloads pass through unchanged, spans are still created.
 - Extends RxJS `WebSocketSubject` directly for API compatibility
 - Maintains context queues (`_pendingSendContexts`, `_pendingReceiveCtxs`) because RxJS may buffer messages before the socket is open
 - Overrides `_subscribe()` to inject extracted receive context into the observable pipeline
+- **`FallbackWebSocket` proxy** (`createFallbackCtor`): when the default `['otel-ws']` offer is used (no explicit protocol), the internal WebSocket constructor is wrapped with a proxy that suppresses pre-open errors and retries once without any subprotocol if the server closes the connection before `onopen`. After a successful fallback, `protocol === ''` → `clientEnvelopeActive` returns `false` → passthrough mode. Only active for the default protocol-undefined case; explicit protocols bypass this proxy.
 
 ### otel-nats
 
