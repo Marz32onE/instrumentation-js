@@ -1,6 +1,6 @@
 {
   "name": "@marz32one/otel-rxjs-ws",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "RxJS webSocket-aligned OpenTelemetry trace propagation (embedded + header envelope; compatible with instrumentation-go/otel-gorilla-ws)",
   "type": "module",
   "main": "./dist/index.js",
