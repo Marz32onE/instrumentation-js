@@ -23,6 +23,7 @@ import {
 } from "./wire-message.js";
 import { getTracerProvider } from "./options.js";
 import { version } from "./version.js";
+import { wsTracingEnabled } from "./env-flags.js";
 
 const OTEL_WS_PROTOCOL = "otel-ws";
 /** Defensive / non-RFC wire prefix; negotiated subprotocol is usually bare `Pi` or `otel-ws`. */
@@ -155,6 +156,13 @@ export class OtelWebSocket extends BaseWebSocket {
         typeof p === "string" && p.length > 0 && p !== OTEL_WS_PROTOCOL,
     );
     const user = [...new Set(normalized)];
+
+    if (!wsTracingEnabled()) {
+      // Tracing disabled: connect without any otel-ws protocol offer; no patching.
+      super(address, user, options);
+      return;
+    }
+
     // No user subprotocols -> keep a plain ws handshake (no implicit otel-ws offer).
     // This preserves compatibility for endpoints that intentionally use empty protocol negotiation.
     const offer =
@@ -193,6 +201,11 @@ export namespace OtelWebSocket {
   /** Instrumented WebSocket server. Mirrors WebSocket.Server from the ws package. */
   export class Server extends BaseWebSocket.Server {
     constructor(options?: BaseWebSocket.ServerOptions, callback?: () => void) {
+      if (!wsTracingEnabled()) {
+        // Tracing disabled: create a plain WebSocket server without protocol interception.
+        super(options, callback);
+        return;
+      }
       // ws@5 ServerOptions types model handleProtocols loosely; narrow at runtime boundary.
       const userHandleProtocols: WsHandleProtocols | undefined =
         options !== undefined && typeof options.handleProtocols === "function"
@@ -268,6 +281,7 @@ export function instrumentSocket(
   ws: BaseWebSocket,
   opts?: OtelWebSocket.InstrumentSocketOptions,
 ): BaseWebSocket {
+  if (!wsTracingEnabled()) return ws;
   const tracer = getTracerProvider().getTracer("@marz32one/otel-ws", version());
   if (ws.readyState === BaseWebSocket.OPEN) {
     const tryActivate = (): void => {

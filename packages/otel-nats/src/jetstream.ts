@@ -36,6 +36,7 @@ import {
   startJsMsgConsumerSpan,
 } from './jsmsg-instrumentation.js';
 import type { JetStreamTraceConn } from './jsmsg-instrumentation.js';
+import { natsTracingEnabled } from './env-flags.js';
 
 export { getJetStreamMessageTraceContext } from './msg-trace.js';
 
@@ -57,9 +58,10 @@ function wrapConsumeCallbackOptions(
   conn: JetStreamTraceConn,
   consumerName: string,
   mode: 'receive' | 'process',
+  tracingEnabled: boolean,
   opts?: ConsumeOptions,
 ): ConsumeOptions | undefined {
-  if (!opts?.callback) return opts;
+  if (!tracingEnabled || !opts?.callback) return opts;
   const user = opts.callback;
   return {
     ...opts,
@@ -79,9 +81,10 @@ function wrapConsumeCallbackOptions(
 function wrapPushConsumeCallbackOptions(
   conn: JetStreamTraceConn,
   consumerName: string,
+  tracingEnabled: boolean,
   opts?: PushConsumerOptions,
 ): PushConsumerOptions | undefined {
-  if (!opts?.callback) return opts;
+  if (!tracingEnabled || !opts?.callback) return opts;
   const user = opts.callback;
   return {
     ...opts,
@@ -107,17 +110,20 @@ export class OtelConsumerMessages {
   readonly #inner: ConsumerMessages;
   readonly #consumerName: string;
   readonly #mode: 'receive' | 'process';
+  readonly #tracingEnabled: boolean;
 
   constructor(
     conn: OtelNatsConn,
     inner: ConsumerMessages,
     consumerName: string,
     mode: 'receive' | 'process',
+    tracingEnabled: boolean,
   ) {
     this.#conn = conn;
     this.#inner = inner;
     this.#consumerName = consumerName;
     this.#mode = mode;
+    this.#tracingEnabled = tracingEnabled;
   }
 
   close(): Promise<void | Error> {
@@ -149,6 +155,10 @@ export class OtelConsumerMessages {
   }
 
   async *[Symbol.asyncIterator](): AsyncIterableIterator<JsMsg> {
+    if (!this.#tracingEnabled) {
+      yield* this.#inner;
+      return;
+    }
     let lastSpan: Span | undefined;
     try {
       for await (const msg of this.#inner) {
@@ -171,10 +181,12 @@ export class OtelConsumerMessages {
 class OtelConsumersDelegate {
   readonly #conn: OtelNatsConn;
   readonly #inner: Consumers;
+  readonly #tracingEnabled: boolean;
 
-  constructor(conn: OtelNatsConn, inner: Consumers) {
+  constructor(conn: OtelNatsConn, inner: Consumers, tracingEnabled: boolean) {
     this.#conn = conn;
     this.#inner = inner;
+    this.#tracingEnabled = tracingEnabled;
   }
 
   get(
@@ -183,13 +195,13 @@ class OtelConsumersDelegate {
   ): Promise<OtelConsumer> {
     return this.#inner.get(stream, name).then((c) => {
       const consumerName = typeof name === 'string' ? name : 'ordered';
-      return new OtelConsumer(this.#conn, c, consumerName);
+      return new OtelConsumer(this.#conn, c, consumerName, this.#tracingEnabled);
     });
   }
 
   getConsumerFromInfo(ci: ConsumerInfo): OtelConsumer {
     const c = this.#inner.getConsumerFromInfo(ci);
-    return new OtelConsumer(this.#conn, c, ci.name);
+    return new OtelConsumer(this.#conn, c, ci.name, this.#tracingEnabled);
   }
 
   getPushConsumer(
@@ -198,12 +210,12 @@ class OtelConsumersDelegate {
   ): Promise<OtelPushConsumer> {
     return this.#inner.getPushConsumer(stream, name).then((p) => {
       const consumerName = typeof name === 'string' ? name : 'push';
-      return new OtelPushConsumer(this.#conn, p, consumerName);
+      return new OtelPushConsumer(this.#conn, p, consumerName, this.#tracingEnabled);
     });
   }
 
   getBoundPushConsumer(opts: BoundPushConsumerOptions): Promise<OtelPushConsumer> {
-    return this.#inner.getBoundPushConsumer(opts).then((p) => new OtelPushConsumer(this.#conn, p, 'bound'));
+    return this.#inner.getBoundPushConsumer(opts).then((p) => new OtelPushConsumer(this.#conn, p, 'bound', this.#tracingEnabled));
   }
 }
 
@@ -215,11 +227,13 @@ export class JetStream {
   readonly #conn: OtelNatsConn;
   readonly #js: JetStreamClient;
   readonly #consumers: OtelConsumersDelegate;
+  readonly #tracingEnabled: boolean;
 
   constructor(conn: OtelNatsConn) {
     this.#conn = conn;
     this.#js = natsJetStream(conn.natsConn());
-    this.#consumers = new OtelConsumersDelegate(conn, this.#js.consumers);
+    this.#tracingEnabled = natsTracingEnabled();
+    this.#consumers = new OtelConsumersDelegate(conn, this.#js.consumers, this.#tracingEnabled);
   }
 
   get apiPrefix(): string {
@@ -259,6 +273,9 @@ export class JetStream {
     opts?: Partial<JetStreamPublishOptions> & JetStreamOtelMixin,
   ): Promise<PubAck> {
     const { otelContext: oc, traceDestination: tdOpt, ...rest } = opts ?? {};
+    if (!this.#tracingEnabled) {
+      return this.#js.publish(subject, data, rest);
+    }
     const ctx = oc ?? otelContext.active();
     const { tracer, propagator } = this.#conn.traceContext();
     const serverAddress = this.#conn.serverAddress();
@@ -305,11 +322,13 @@ export class OtelConsumer {
   readonly #conn: OtelNatsConn;
   readonly #raw: Consumer;
   readonly #consumerName: string;
+  readonly #tracingEnabled: boolean;
 
-  constructor(conn: OtelNatsConn, raw: Consumer, consumerName: string) {
+  constructor(conn: OtelNatsConn, raw: Consumer, consumerName: string, tracingEnabled: boolean) {
     this.#conn = conn;
     this.#raw = raw;
     this.#consumerName = consumerName;
+    this.#tracingEnabled = tracingEnabled;
   }
 
   isPullConsumer(): boolean {
@@ -321,21 +340,22 @@ export class OtelConsumer {
   }
 
   consume(opts?: ConsumeOptions): Promise<OtelConsumerMessages> {
-    const wrapped = wrapConsumeCallbackOptions(this.#conn, this.#consumerName, 'receive', opts);
+    const wrapped = wrapConsumeCallbackOptions(this.#conn, this.#consumerName, 'receive', this.#tracingEnabled, opts);
     return this.#raw.consume(wrapped).then(
-      (m) => new OtelConsumerMessages(this.#conn, m, this.#consumerName, 'receive'),
+      (m) => new OtelConsumerMessages(this.#conn, m, this.#consumerName, 'receive', this.#tracingEnabled),
     );
   }
 
   fetch(opts?: FetchOptions): Promise<OtelConsumerMessages> {
     return this.#raw.fetch(opts).then(
-      (m) => new OtelConsumerMessages(this.#conn, m, this.#consumerName, 'receive'),
+      (m) => new OtelConsumerMessages(this.#conn, m, this.#consumerName, 'receive', this.#tracingEnabled),
     );
   }
 
   async next(opts?: NextOptions): Promise<JsMsg | null> {
     const msg = await this.#raw.next(opts);
     if (!msg) return null;
+    if (!this.#tracingEnabled) return msg;
     const span = startJsMsgConsumerSpan(this.#conn, msg, this.#consumerName, 'receive');
     const ctx = contextWithEndedSpan(span);
     span.end();
@@ -359,11 +379,13 @@ export class OtelPushConsumer {
   readonly #conn: OtelNatsConn;
   readonly #raw: PushConsumer;
   readonly #consumerName: string;
+  readonly #tracingEnabled: boolean;
 
-  constructor(conn: OtelNatsConn, raw: PushConsumer, consumerName: string) {
+  constructor(conn: OtelNatsConn, raw: PushConsumer, consumerName: string, tracingEnabled: boolean) {
     this.#conn = conn;
     this.#raw = raw;
     this.#consumerName = consumerName;
+    this.#tracingEnabled = tracingEnabled;
   }
 
   isPullConsumer(): boolean {
@@ -375,9 +397,9 @@ export class OtelPushConsumer {
   }
 
   consume(opts?: PushConsumerOptions): Promise<OtelConsumerMessages> {
-    const wrapped = wrapPushConsumeCallbackOptions(this.#conn, this.#consumerName, opts);
+    const wrapped = wrapPushConsumeCallbackOptions(this.#conn, this.#consumerName, this.#tracingEnabled, opts);
     return this.#raw.consume(wrapped).then(
-      (m) => new OtelConsumerMessages(this.#conn, m, this.#consumerName, 'process'),
+      (m) => new OtelConsumerMessages(this.#conn, m, this.#consumerName, 'process', this.#tracingEnabled),
     );
   }
 

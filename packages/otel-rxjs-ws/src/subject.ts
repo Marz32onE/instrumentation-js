@@ -18,6 +18,14 @@ import type { WebSocketSubjectConfig as RxWebSocketSubjectConfig } from 'rxjs/we
  */
 export type WebSocketSubjectConfig<T = unknown> = RxWebSocketSubjectConfig<T> & {
   prependOtelSubprotocol?: boolean;
+  /**
+   * Programmatic tracing on/off switch. Useful in browser environments where
+   * `process.env` is unavailable. When omitted, Node.js environments read
+   * `OTEL_WS_TRACING_ENABLED` / `OTEL_INSTRUMENTATION_JS_TRACING_ENABLED`;
+   * browser environments default to `true`. An explicit `false` here takes
+   * priority over any environment variable.
+   */
+  tracingEnabled?: boolean;
 };
 
 import {
@@ -28,6 +36,7 @@ import {
 } from './wire-message.js';
 import { getTracerProvider } from './options.js';
 import { version } from './version.js';
+import { wsTracingEnabled } from './env-flags.js';
 
 const OTEL_WS_PROTOCOL = 'otel-ws';
 const OTEL_WS_INSTRUMENTED_PREFIX = `${OTEL_WS_PROTOCOL}+`;
@@ -188,6 +197,7 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
     WebSocketSubjectConfig<T>['deserializer']
   > | null;
   private _otelProtocolActive = false;
+  private readonly _tracingEnabled: boolean;
 
   constructor(urlOrConfig: string | WebSocketSubjectConfig<T>) {
     const holder: { inst?: InstrumentedWebSocketSubject<T> } = {};
@@ -199,10 +209,13 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
       serializer: userSerializer,
       deserializer: userDeserializer,
       prependOtelSubprotocol,
+      tracingEnabled: tracingEnabledOpt,
       ...rest
     } = configIn;
 
-    const prepend = prependOtelSubprotocol !== false;
+    // Config option takes priority over env var (enables programmatic control in browser).
+    const tracingEnabled = tracingEnabledOpt !== undefined ? tracingEnabledOpt : wsTracingEnabled();
+    const prepend = prependOtelSubprotocol !== false && tracingEnabled;
 
     const userOpenObserver = configIn.openObserver;
     const userCloseObserver = configIn.closingObserver;
@@ -221,16 +234,18 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
         : rest.WebSocketCtor,
       openObserver: {
         next: (event: Event) => {
-          const target = event.target as WebSocket | null;
-          const rawProtocol = target?.protocol ?? '';
-          holder.inst!._otelProtocolActive = clientEnvelopeActive(rawProtocol);
-          if (prepend && target) {
-            const facade = userFacingProtocolFromWire(rawProtocol);
-            Object.defineProperty(target, 'protocol', {
-              configurable: true,
-              enumerable: true,
-              get: () => facade,
-            });
+          if (tracingEnabled) {
+            const target = event.target as WebSocket | null;
+            const rawProtocol = target?.protocol ?? '';
+            holder.inst!._otelProtocolActive = clientEnvelopeActive(rawProtocol);
+            if (prepend && target) {
+              const facade = userFacingProtocolFromWire(rawProtocol);
+              Object.defineProperty(target, 'protocol', {
+                configurable: true,
+                enumerable: true,
+                get: () => facade,
+              });
+            }
           }
           userOpenObserver?.next?.(event);
         },
@@ -250,20 +265,23 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
     super(merged);
     holder.inst = this;
 
+    this._tracingEnabled = tracingEnabled;
     this._userSerializer = userSerializer ?? null;
     this._userDeserializer = userDeserializer ?? null;
     this._tracer = getTracerProvider().getTracer('@marz32one/otel-rxjs-ws', version());
   }
 
   override next(value: T): void {
-    this._pendingSendContexts.push(otelContext.active());
+    if (this._tracingEnabled) {
+      this._pendingSendContexts.push(otelContext.active());
+    }
     const lenBefore = this._pendingSendContexts.length;
     try {
       super.next(value);
     } catch (err) {
       // Only remove the context we just pushed if the serializer didn't already shift it.
       // The serializer shifts the context, so if length is unchanged, serialization never ran.
-      if (this._pendingSendContexts.length === lenBefore) {
+      if (this._tracingEnabled && this._pendingSendContexts.length === lenBefore) {
         this._pendingSendContexts.pop();
       }
       throw err;
@@ -279,7 +297,9 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
             subscriber.next(value);
           });
         } else {
-          diag.warn('[otel-rxjs-ws] receive context queue empty, delivering without extracted trace context');
+          if (this._tracingEnabled) {
+            diag.warn('[otel-rxjs-ws] receive context queue empty, delivering without extracted trace context');
+          }
           subscriber.next(value);
         }
       },
@@ -301,6 +321,12 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
   private _serializeOutgoing(value: T): ReturnType<
     NonNullable<WebSocketSubjectConfig<T>['serializer']>
   > {
+    if (!this._tracingEnabled) {
+      return this._userSerializer
+        ? this._userSerializer(value)
+        : defaultSerializer(value);
+    }
+
     const activeCtx =
       this._pendingSendContexts.shift() ?? otelContext.active();
     const span = this._tracer.startSpan(
@@ -362,6 +388,12 @@ class InstrumentedWebSocketSubject<T> extends WebSocketSubject<T> {
   }
 
   private _deserializeIncoming(e: MessageEvent): T {
+    if (!this._tracingEnabled) {
+      return this._userDeserializer
+        ? this._userDeserializer(e)
+        : defaultDeserializer<T>(e);
+    }
+
     if (!this._otelProtocolActive) {
       const span = this._tracer.startSpan(
         'websocket.receive',
